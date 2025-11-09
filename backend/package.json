@@ -1,0 +1,28 @@
+{
+  "name": "eram-api-backend",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "async-handler-express": "^0.2.4",
+    "axios": "^1.12.2",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "cros": "^1.1.0",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "express-async-handler": "^1.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.20.0",
+    "mongoose": "^8.18.2",
+    "nodemailer": "^7.0.7"
+  }
+}
