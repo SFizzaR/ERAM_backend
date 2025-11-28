@@ -186,23 +186,31 @@ router.patch("/verifyemail", async (req, res) => {
         .status(200)
         .json({ status: "Success", message: "User verified successfully" });
 });
-// backend/routes/authRoutes.js
+
 router.post('/google', async (req, res) => {
     const { email, googleId, name } = req.body;
 
     try {
         const plainEmail = email;
         const hashEmail = hashForLookup(plainEmail);
-        let user = await users.findOne({ emailHash: hashEmail });
+        let user = await User.findOne({ emailHash: hashEmail });  // Fixed: User instead of users
 
         if (!user) {
-            user = new users({
+            user = new User({  // Fixed: User instead of users
                 email: encrypt(plainEmail),
                 emailHash: hashEmail,
                 googleId,
-                name,
+                username: name,  // Map name to username
+                current_city: '',  // Default; prompt on frontend if needed
+                preferred_language: 'en',  // Default
+                children: []  // Default empty
             });
             await user.save();
+        } else if (!user.googleId) {
+            // If email exists but no googleId, link the account
+            user.googleId = googleId;
+            await user.save();
+            console.log(`Linked Google account for user ${user._id}`);
         }
 
         const token = jwt.sign(
@@ -212,8 +220,9 @@ router.post('/google', async (req, res) => {
         );
 
         res.status(201).json({
-            _id: user.id,
+            _id: user._id,  // Fixed: _id
             email: decrypt(user.email),
+            username: user.username,
             token,
         });
     } catch (err) {
