@@ -28,7 +28,11 @@ const userSchema = mongoose.Schema({
             name: String,
             dateOfBirth: Date,
             level: Number,
-            age: Number
+            age: Number,
+            screened: {
+                type: Boolean,
+                default: false
+            }
         }
     ],
 
@@ -37,5 +41,6 @@ const userSchema = mongoose.Schema({
         timestamps: true // ✅ automatically adds createdAt and updatedAt
     }
 );
+
 
 module.exports = mongoose.model("User", userSchema)
