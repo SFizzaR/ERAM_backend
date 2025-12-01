@@ -16,61 +16,74 @@ router.post('/register', expressAsyncHandler(async (req, res) => {
             res.status(400).json({ message: "All fields are mandatory" });
             return;
         }
-        hashEmail = hashForLookup(email)
-        const userAvailable = await User.findOne({ emailHash: hashEmail });
-        if (userAvailable) {
-            res.status(400).json({ message: "User already registered" });
-            return; // Stop further execution
+        const hashEmail = hashForLookup(email)
+        const user = await User.findOne({ emailHash: hashEmail });
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+        if (!user.isVerifiedEmail) {
+            return res.status(400).json({ message: "Email not verified" });
+        }
+        if (user.password) {
+            return res.status(400).json({ message: "User already registered" });
         }
 
         // Hash the password
         const hashPassword = await bcrypt.hash(password, 10);
-        age = calculateAge(child.dateOfBirth)
+        const age = calculateAge(child.dateOfBirth)
 
         if (age === null) {
             return res.status(400).json({ message: "Invalid date of birth" });
         }
 
-        child.age = age
+        user.password = hashPassword;
+        user.current_city = city;
+        user.preferred_language = language;
+        user.username = username;
+        user.children = [{ ...child, age }];
 
-        const user = await User.create({
-            email: encrypt(email),
-            emailHash: hashEmail,
-            password: hashPassword,
-            current_city: city,
-            preferred_language: language,
-            username: username,
-            children: child
-        })
+        await user.save();
 
+        const accessToken = jwt.sign(
+            {
+                user: {
+                    id: user._id,
+                }
+            },
+            process.env.JWT_SECRET,
+            { expiresIn: "1h" }
+        );
 
-        if (user) {
-            console.log(`User created ${user}`)
-
-            const accessToken = jwt.sign(
-                {
-                    user: {
-                        id: user._id,
-                    }
-                },
-                process.env.JWT_SECRET,
-                { expiresIn: "1h" }
-            );
-
-            res.status(201).json({
-                _id: user.id,
-                username: user.username,
-                email: encrypt(user.email),
-                accessToken
-            });
-        }
+        res.status(201).json({
+            _id: user.id,
+            username: user.username,
+            email: decrypt(user.email),
+            accessToken
+        });
     }
     catch (err) {
         res.status(500).json({ message: "Server error", error: err.message });
 
     }
 
-}))
+}));
+
+router.get('/me', protect, expressAsyncHandler(async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password -emailHash'); // Exclude sensitive fields
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({
+      _id: user._id,
+      email: decrypt(user.email), // Assuming you decrypt email
+      username: user.username,
+      // Add other fields as needed
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}));
 
 router.put('/updateUser', protect, expressAsyncHandler(async (req, res) => {
     try {
@@ -164,27 +177,22 @@ router.post('/login', expressAsyncHandler(async (req, res) => {
     }
 }));
 
-router.patch("/verifyemail", async (req, res) => {
+router.post("/verifyemail", async (req, res) => {
 
-    const emailToken = req.body.emailToken;
-    console.log(emailToken)
-    if (!emailToken) {
-        return res.status(400).json({ status: "Failed", error: "empty request" });
-    }
-    let user = await User.findOne({ where: { emailToken: emailToken } });
+    const { email, code } = req.body;
+  const hashEmail = hashForLookup(email);
+  const user = await User.findOne({ emailHash: hashEmail });
 
-    if (!user) {
-        return res.status(404).json({ status: "Failed", error: "User not found" });
-    }
+  if (!user || user.emailVerificationCode !== code || Date.now() > user.emailVerificationExpires) {
+    return res.status(400).json({ message: "Invalid or expired code" });
+  }
 
-    await User.update(
-        { isVerifiedEmail: true, emailToken: null },
-        { where: { emailToken: emailToken } }
-    );
-    await User.findOne({ where: { emailToken: emailToken } });
-    return res
-        .status(200)
-        .json({ status: "Success", message: "User verified successfully" });
+  user.isVerifiedEmail = true;
+  user.emailVerificationCode = null;
+  user.emailVerificationExpires = null;
+  await user.save();
+
+  res.json({ message: "Verified" });
 });
 
 router.post('/google', async (req, res) => {
@@ -193,21 +201,20 @@ router.post('/google', async (req, res) => {
     try {
         const plainEmail = email;
         const hashEmail = hashForLookup(plainEmail);
-        let user = await User.findOne({ emailHash: hashEmail });  // Fixed: User instead of users
+        let user = await User.findOne({ emailHash: hashEmail });  
 
         if (!user) {
-            user = new User({  // Fixed: User instead of users
+            user = new User({  
                 email: encrypt(plainEmail),
                 emailHash: hashEmail,
                 googleId,
-                username: name,  // Map name to username
-                current_city: '',  // Default; prompt on frontend if needed
-                preferred_language: 'en',  // Default
-                children: []  // Default empty
+                username: name,  
+                current_city: '',  
+                preferred_language: 'en',  
+                children: []  
             });
             await user.save();
         } else if (!user.googleId) {
-            // If email exists but no googleId, link the account
             user.googleId = googleId;
             await user.save();
             console.log(`Linked Google account for user ${user._id}`);
