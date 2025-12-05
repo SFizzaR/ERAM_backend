@@ -1,30 +1,59 @@
-const jwt = require("jsonwebtoken")
-const User = require('../models/userModel')
+// middleware/protectMiddleware.js
+const jwt = require("jsonwebtoken");
+const User = require('../models/userModel');
+const { supabase } = require('../lib/supabase');
+const { decrypt } = require('../utils/crypto');  // ← ADD THIS
+
 const protect = async (req, res, next) => {
     let token;
-    if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
-        try {
-            token = req.headers.authorization.split(" ")[1];
 
-            console.log("Received Token:", token); // Debugging
+    if (!req.headers.authorization?.startsWith("Bearer")) {
+        return res.status(401).json({ message: "No token" });
+    }
 
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            console.log("Decoded Token:", decoded); // Debugging
+    try {
+        token = req.headers.authorization.split(" ")[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-            req.user = await User.findById(decoded.user.id).select("-password");
+        // Get MongoDB user
+        const user = await User.findById(decoded.user.id);
+        if (!user) return res.status(401).json({ message: "User not found" });
 
-            if (!req.user) {
-                return res.status(401).json({ message: "User not found" });
+        // ────── FIX: Decrypt email before sending to Supabase ──────
+        const realEmail = decrypt(user.email);  // ← THIS IS THE KEY LINE
+
+        let supabaseUid = user.supabase_uid;
+
+        if (!supabaseUid) {
+            // Create user in Supabase Auth using REAL email
+            const { data: sbUser, error } = await supabase.auth.admin.createUser({
+                email: realEmail,                    // ← Real email
+                password: `temp_${Math.random().toString(36).slice(2)}@Pass123!`,
+                email_confirm: true,
+                user_metadata: { mongo_id: user._id.toString() }
+            });
+
+            if (error) {
+                console.error("Supabase createUser error:", error.message);
+                return res.status(500).json({ message: "Failed to sync user with forum" });
             }
 
-            next();
-        } catch (error) {
-            console.error("JWT Error:", error.message);
-            res.status(401).json({ message: "Not authorized, token failed" });
+            supabaseUid = sbUser.user.id;
+
+            // Save the Supabase UID back to MongoDB
+            user.supabase_uid = supabaseUid;
+            await user.save();
         }
-    } else {
-        res.status(401).json({ message: "Not authorized, no token" });
+
+        // Attach both for maximum compatibility
+        req.user = user;                            // MongoDB user (your old routes)
+        req.auth = { userId: supabaseUid };         // ← Forum routes use this
+
+        next();
+    } catch (error) {
+        console.error("Auth Error:", error.message);
+        res.status(401).json({ message: "Not authorized" });
     }
 };
 
-module.exports = { protect }
+module.exports = { protect };
