@@ -6,13 +6,12 @@ const { protect } = require('../middleware/protectMiddleware');
 const router = Router();
 router.use(protect); // All routes require logged-in user
 
-// Helper: Get MongoDB user + Supabase user sync (optional)
 const getUserId = (req) => req.user._id.toString();
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
   const { title, content, category, media_urls = [] } = req.body;
-  const userId = req.auth.userId; // from protect middleware (Supabase UID)
+  const userId = req.auth.userId; 
 
   const { data, error } = await supabase
     .from('posts')
@@ -25,16 +24,14 @@ router.post('/posts', async (req, res) => {
 });
 
 // ==================== GET FEED (with filters) ====================
-// GET /api/forum/feed
 router.get('/feed', async (req, res) => {
   const { category, sort = 'recent', page = 1 } = req.query;
   const limit = 20;
   const rangeFrom = (page - 1) * limit;
   const rangeTo = rangeFrom + limit - 1;
-  const userId = req.auth.userId; // current logged-in user
+  const userId = req.auth.userId; 
 
   try {
-    // Base query — get posts with basic fields
     let query = supabase
       .from('posts')
       .select(`
@@ -49,12 +46,10 @@ router.get('/feed', async (req, res) => {
       `)
       .range(rangeFrom, rangeTo);
 
-    // Filter by category
     if (category && category !== 'all') {
       query = query.eq('category', category);
     }
 
-    // Sorting
     if (sort === 'top') {
       query = query.order('created_at', { ascending: false }); // we'll sort by likes on frontend or use RPC later
     } else {
@@ -65,7 +60,6 @@ router.get('/feed', async (req, res) => {
 
     if (error) throw error;
 
-    // Now enrich each post with likes, comments, and is_liked in parallel
     const enrichedPosts = await Promise.all(
       posts.map(async (post) => {
         const [
@@ -98,7 +92,6 @@ router.get('/feed', async (req, res) => {
 });
 
 // ==================== React POST ====================
-// POST /api/forum/posts/:id/react
 router.post('/posts/:id/react', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
@@ -109,7 +102,7 @@ router.post('/posts/:id/react', async (req, res) => {
     return res.status(400).json({ error: 'Invalid reaction' });
   }
 
-  // Check if user already reacted with this type → toggle
+  // if user already reacted with this type → toggle
   const { data: existing } = await supabase
     .from('post_reactions')
     .select('id')
@@ -119,18 +112,16 @@ router.post('/posts/:id/react', async (req, res) => {
     .single();
 
   if (existing) {
-    // Remove reaction
     await supabase.from('post_reactions').delete().eq('id', existing.id);
     return res.json({ reacted: false, reaction });
   } else {
-    // Add reaction
     await supabase.from('post_reactions').insert({
       post_id: postId,
       user_id: userId,
       reaction_type: reaction
     });
 
-    // Notify post owner (except self-reaction)
+    // Notify post owner 
     const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
     if (post.user_id !== userId) {
       await supabase.from('notifications').insert({
@@ -138,7 +129,7 @@ router.post('/posts/:id/react', async (req, res) => {
         type: 'reaction',
         post_id: postId,
         trigger_user_id: userId,
-        message: `${reaction}` // you can customize later
+        message: `${reaction}` 
       });
     }
 
@@ -146,7 +137,6 @@ router.post('/posts/:id/react', async (req, res) => {
   }
 });
 
-// GET reactions count for a post (for feed & detail)
 router.get('/posts/:id/reactions', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
@@ -197,7 +187,6 @@ router.post('/posts/:id/comments', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  // Notify post owner (if not self-reply)
   const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
   if (post.user_id !== userId) {
     await supabase.from('notifications').insert({
@@ -213,7 +202,6 @@ router.post('/posts/:id/comments', async (req, res) => {
 });
 
 // ==================== GET NOTIFICATIONS ====================
-// GET /api/forum/notifications  ← FINAL WORKING VERSION
 router.get('/notifications', async (req, res) => {
   const userId = req.auth.userId;
 
@@ -238,8 +226,6 @@ router.get('/notifications', async (req, res) => {
 
     if (error) throw error;
 
-    // Optional: enrich with trigger user's username from MongoDB (if you want)
-    // For now, just send the trigger_user_id — frontend can show "Someone liked your post"
     res.json({ notifications: data });
 
   } catch (err) {
@@ -255,14 +241,11 @@ router.patch('/notifications/read', async (req, res) => {
   res.json({ success: true });
 });
 
-// routes/forumRoutes.js (add these at the end)
-
 // ==================== SAVE / BOOKMARK POST (TOGGLE) ====================
 router.post('/posts/:id/saveBookmark', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
 
-  // Check if already saved
   const { data: existing } = await supabase
     .from('saved_posts')
     .select()
@@ -271,11 +254,10 @@ router.post('/posts/:id/saveBookmark', async (req, res) => {
     .single();
 
   if (existing) {
-    // Unsave
+    
     await supabase.from('saved_posts').delete().match({ post_id: postId, user_id: userId });
     res.json({ saved: false });
   } else {
-    // Save
     await supabase.from('saved_posts').insert({ post_id: postId, user_id: userId });
     res.json({ saved: true });
   }
@@ -286,7 +268,6 @@ router.delete('/posts/:id', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
 
-  // Check ownership first
   const { data: post } = await supabase
     .from('posts')
     .select('user_id')
@@ -309,7 +290,6 @@ router.delete('/comments/:id', async (req, res) => {
   const commentId = req.params.id;
   const userId = req.auth.userId;
 
-  // Check ownership
   const { data: comment } = await supabase
     .from('comments')
     .select('user_id')
@@ -347,14 +327,11 @@ router.post('/reports', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  // Optional: Notify admins (if you have an admins table or email)
-  // await sendAdminEmail(`New report on ${target_type} #${target_id}: ${reason}`);
 
   res.status(201).json(data);
 });
 
 // ==================== GET ALL SAVED POSTS ====================
-// GET /api/forum/saved  ← FINAL FINAL VERSION
 router.get('/saved', async (req, res) => {
   const userId = req.auth.userId;
   const page = parseInt(req.query.page) || 1;
@@ -363,7 +340,6 @@ router.get('/saved', async (req, res) => {
   const to = from + limit - 1;
 
   try {
-    // This now returns correct count because we have a proper PK
     const { data: savedItems, error: savedError, count } = await supabase
       .from('saved_posts')
       .select('post_id, created_at', { count: 'exact' })  // count works now
@@ -401,7 +377,6 @@ router.get('/saved', async (req, res) => {
       })
     );
 
-    // Preserve saved order
     const ordered = savedItems
       .map(s => enriched.find(p => p.id === s.post_id))
       .filter(Boolean);
