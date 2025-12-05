@@ -1,8 +1,7 @@
-// middleware/protectMiddleware.js
 const jwt = require("jsonwebtoken");
 const User = require('../models/userModel');
 const { supabase } = require('../lib/supabase');
-const { decrypt } = require('../utils/crypto');  // ← ADD THIS
+const { decrypt } = require('../utils/crypto');  
 
 const protect = async (req, res, next) => {
     let token;
@@ -19,15 +18,13 @@ const protect = async (req, res, next) => {
         const user = await User.findById(decoded.user.id);
         if (!user) return res.status(401).json({ message: "User not found" });
 
-        // ────── FIX: Decrypt email before sending to Supabase ──────
-        const realEmail = decrypt(user.email);  // ← THIS IS THE KEY LINE
-
+        const realEmail = decrypt(user.email);  
         let supabaseUid = user.supabase_uid;
 
         if (!supabaseUid) {
             // Create user in Supabase Auth using REAL email
             const { data: sbUser, error } = await supabase.auth.admin.createUser({
-                email: realEmail,                    // ← Real email
+                email: realEmail,                   
                 password: `temp_${Math.random().toString(36).slice(2)}@Pass123!`,
                 email_confirm: true,
                 user_metadata: { mongo_id: user._id.toString() }
