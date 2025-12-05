@@ -6,11 +6,20 @@ const userSchema = mongoose.Schema({
         sparse: true,
         unique: [true, "Email address already taken"]
     },
+    emailVerificationCode: String,
+emailVerificationExpires: Date,
+isVerifiedEmail: { type: Boolean, default: false },
     emailHash: { type: String, index: true, unique: true, sparse: true },
     password: {
         type: String,
         sparse: true
     },
+    supabase_uid: {
+    type: String,
+    unique: true,
+    sparse: true
+    },
+    
     username: String,
     googleId: String,
     current_city: String,
@@ -23,12 +32,13 @@ const userSchema = mongoose.Schema({
         type: Boolean,  // ✅ true after successful verification
         default: false
     },
+    
     children: [
         {
             name: String,
             dateOfBirth: Date,
             level: Number,
-            age: Number,
+           age: Number,
             screened: {
                 type: Boolean,
                 default: false
@@ -41,6 +51,5 @@ const userSchema = mongoose.Schema({
         timestamps: true // ✅ automatically adds createdAt and updatedAt
     }
 );
-
 
 module.exports = mongoose.model("User", userSchema)
