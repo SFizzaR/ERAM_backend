@@ -1,4 +1,3 @@
-// routes/forumRoutes.js
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { protect } = require('../middleware/protectMiddleware');
@@ -12,8 +11,19 @@ const getUserId = (req) => req.user._id.toString();
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
-  const { title, content, category, media_urls = [], is_anonymous = false } = req.body;
-  const userId = req.auth.userId;
+const { title, content, category, media_urls = [], is_anonymous = false, post_type } = req.body;
+const userId = req.auth.userId;
+
+
+  // Validate post_type
+  const validTypes = ['query', 'insight'];
+  if (post_type && !validTypes.includes(post_type)) {
+    return res.status(400).json({ error: 'Invalid post_type. Must be "query" or "insight"' });
+  }
+
+  const tags = Array.isArray(req.body.tags) 
+  ? req.body.tags.join(',') 
+  : req.body.category || req.body.tags || ''; // fallback
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -27,7 +37,7 @@ router.post('/posts', async (req, res) => {
 
   const { data, error } = await supabase
     .from('posts')
-    .insert({ user_id: userId, title, content, category, media_urls, is_anonymous })
+    .insert({ user_id: userId, title, content, category: tags, media_urls, is_anonymous, post_type })
     .select()
     .single();
 
@@ -113,7 +123,7 @@ router.get('/feed/global', async (req, res) => {
       .from('posts')
       .select(`
         id, title, content, category, media_urls,
-        created_at, updated_at, user_id, is_anonymous
+        created_at, updated_at, user_id, is_anonymous, post_type
       `)
       .range(from, from + limit - 1)
       .order('created_at', { ascending: false });
@@ -150,7 +160,7 @@ router.get('/feed/city', async (req, res) => {
       .from('posts')
       .select(`
         id, title, content, category, media_urls,
-        created_at, updated_at, user_id, is_anonymous
+        created_at, updated_at, user_id, is_anonymous, post_type
       `)
       .order('created_at', { ascending: false })
       .limit(300); // Safe limit
@@ -185,7 +195,7 @@ router.post('/posts/:id/react', async (req, res) => {
   const userId = req.auth.userId;
   const { reaction } = req.body; // "celebrate" | "heart" | "care" | "insightful" | "support"
 
-  const validReactions = ['celebrate', 'heart', 'care', 'insightful', 'like'];
+const validReactions = ['like', 'love', 'celebrate', 'support', 'insightful'];
   if (!validReactions.includes(reaction)) {
     return res.status(400).json({ error: 'Invalid reaction' });
   }
@@ -239,7 +249,7 @@ router.get('/posts/:id/reactions', async (req, res) => {
     heart: 0,
     care: 0,
     insightful: 0,
-    support: 0
+    like: 0
   };
 
   const userReactions = [];
@@ -456,50 +466,50 @@ router.get('/saved', async (req, res) => {
       .in('id', postIds);
 
     const enriched = await Promise.all(
-  posts.map(async (post) => {
-    // Get reactions summary
-    const { data: reactionsData } = await supabase
-      .from('post_reactions')
-      .select('reaction_type')
-      .eq('post_id', post.id);
+      posts.map(async (post) => {
+        // Get reactions summary
+        const { data: reactionsData } = await supabase
+          .from('post_reactions')
+          .select('reaction_type')
+          .eq('post_id', post.id);
 
-    const reactionCounts = {
-      celebrate: 0,
-      heart: 0,
-      care: 0,
-      insightful: 0,
-      like: 0
-    };
+        const reactionCounts = {
+          celebrate: 0,
+          heart: 0,
+          care: 0,
+          insightful: 0,
+          like: 0
+        };
 
-    reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
+        reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
 
-    const totalReactions = reactionsData.length;
+        const totalReactions = reactionsData.length;
 
-    // Get user's reactions
-    const { data: myReactionsData } = await supabase
-      .from('post_reactions')
-      .select('reaction_type')
-      .eq('post_id', post.id)
-      .eq('user_id', userId);
+        // Get user's reactions
+        const { data: myReactionsData } = await supabase
+          .from('post_reactions')
+          .select('reaction_type')
+          .eq('post_id', post.id)
+          .eq('user_id', userId);
 
-    const myReactions = myReactionsData.map(r => r.reaction_type);
+        const myReactions = myReactionsData.map(r => r.reaction_type);
 
-    // Get comment count
-    const { count: commentCount } = await supabase
-      .from('comments')
-      .select('*', { count: 'exact', head: true })
-      .eq('post_id', post.id);
+        // Get comment count
+        const { count: commentCount } = await supabase
+          .from('comments')
+          .select('*', { count: 'exact', head: true })
+          .eq('post_id', post.id);
 
-    return {
-      ...post,
-      reaction_counts: reactionCounts,
-      total_reactions: totalReactions,
-      my_reactions: myReactions,
-      comment_count: commentCount || 0,
-      saved_at: savedItems.find(s => s.post_id === post.id)?.created_at
-    };
-  })
-);
+        return {
+          ...post,
+          reaction_counts: reactionCounts,
+          total_reactions: totalReactions,
+          my_reactions: myReactions,
+          comment_count: commentCount || 0,
+          saved_at: savedItems.find(s => s.post_id === post.id)?.created_at
+        };
+      })
+    );
 
     const ordered = savedItems
       .map(s => enriched.find(p => p.id === s.post_id))
@@ -558,6 +568,28 @@ router.post('/comments/:id/like', async (req, res) => {
 
     return res.json({ liked: true });
   }
+});
+
+router.get('/comments/:id/likes', async (req, res) => {
+  const commentId = req.params.id;
+  const userId = req.auth.userId;
+
+  const { count } = await supabase
+    .from('comment_likes')
+    .select('*', { count: 'exact', head: true })
+    .eq('comment_id', commentId);
+
+  const { data: myLike } = await supabase
+    .from('comment_likes')
+    .select('user_id')
+    .eq('comment_id', commentId)
+    .eq('user_id', userId)
+    .limit(1);
+
+  res.json({
+    total_likes: count || 0,
+    is_liked_by_me: !!myLike?.length
+  });
 });
 
 module.exports = router;
