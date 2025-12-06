@@ -2,6 +2,8 @@
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { protect } = require('../middleware/protectMiddleware');
+const User = require('../models/userModel');
+const { filterContent } = require('../utils/contentFilter');
 
 const router = Router();
 router.use(protect); // All routes require logged-in user
@@ -10,12 +12,22 @@ const getUserId = (req) => req.user._id.toString();
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
-  const { title, content, category, media_urls = [] } = req.body;
-  const userId = req.auth.userId; 
+  const { title, content, category, media_urls = [], is_anonymous = false } = req.body;
+  const userId = req.auth.userId;
+
+  const titleCheck = filterContent(title);
+  const contentCheck = filterContent(content);
+
+  if (titleCheck.blocked || contentCheck.blocked) {
+    return res.status(400).json({
+      error: 'Post blocked',
+      reason: titleCheck.reason || contentCheck.reason
+    });
+  }
 
   const { data, error } = await supabase
     .from('posts')
-    .insert({ user_id: userId, title, content, category, media_urls })
+    .insert({ user_id: userId, title, content, category, media_urls, is_anonymous })
     .select()
     .single();
 
@@ -23,70 +35,146 @@ router.post('/posts', async (req, res) => {
   res.status(201).json(data);
 });
 
-// ==================== GET FEED (with filters) ====================
-router.get('/feed', async (req, res) => {
-  const { category, sort = 'recent', page = 1 } = req.query;
+async function enrichPosts(posts, userId) {
+  const uniqueUserIds = [...new Set(posts.map(p => p.user_id))];
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username, current_city')
+    .in('id', uniqueUserIds);
+
+  const profileMap = new Map(profiles.map(p => [p.id, p]));
+
+  // Fallback to MongoDB if profile missing (rare)
+  const missingUids = uniqueUserIds.filter(uid => !profileMap.has(uid));
+  if (missingUids.length) {
+    const mongoUsers = await User.find({ supabase_uid: { $in: missingUids } });
+    mongoUsers.forEach(u => profileMap.set(u.supabase_uid, { username: u.username, current_city: u.current_city }));
+  }
+
+  return await Promise.all(
+    posts.map(async (post) => {
+      const profile = profileMap.get(post.user_id) || {};
+
+      // Get reactions summary
+      const { data: reactionsData } = await supabase
+        .from('post_reactions')
+        .select('reaction_type')
+        .eq('post_id', post.id);
+
+      const reactionCounts = {
+        celebrate: 0,
+        heart: 0,
+        care: 0,
+        insightful: 0,
+        like: 0
+      };
+
+      reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
+
+      const totalReactions = reactionsData.length;
+
+      // Get user's reactions
+      const { data: myReactionsData } = await supabase
+        .from('post_reactions')
+        .select('reaction_type')
+        .eq('post_id', post.id)
+        .eq('user_id', userId);
+
+      const myReactions = myReactionsData.map(r => r.reaction_type);
+
+      // Get comment count
+      const { count: commentCount } = await supabase
+        .from('comments')
+        .select('*', { count: 'exact', head: true })
+        .eq('post_id', post.id);
+
+      return {
+        ...post,
+        username: post.is_anonymous ? 'Anonymous' : profile.username || 'Unknown',
+        city: post.is_anonymous ? null : profile.current_city,
+        reaction_counts: reactionCounts,
+        total_reactions: totalReactions,
+        my_reactions: myReactions,
+        comment_count: commentCount || 0
+      };
+    })
+  );
+}
+
+// GLOBAL FEED – UPDATED FOR REACTIONS
+router.get('/feed/global', async (req, res) => {
+  const { category, page = 1 } = req.query;
   const limit = 20;
-  const rangeFrom = (page - 1) * limit;
-  const rangeTo = rangeFrom + limit - 1;
-  const userId = req.auth.userId; 
+  const from = (page - 1) * limit;
+  const userId = req.auth.userId;
 
   try {
     let query = supabase
       .from('posts')
       .select(`
-        id,
-        title,
-        content,
-        category,
-        media_urls,
-        created_at,
-        updated_at,
-        user_id
+        id, title, content, category, media_urls,
+        created_at, updated_at, user_id, is_anonymous
       `)
-      .range(rangeFrom, rangeTo);
+      .range(from, from + limit - 1)
+      .order('created_at', { ascending: false });
 
-    if (category && category !== 'all') {
-      query = query.eq('category', category);
-    }
-
-    if (sort === 'top') {
-      query = query.order('created_at', { ascending: false }); // we'll sort by likes on frontend or use RPC later
-    } else {
-      query = query.order('created_at', { ascending: false });
-    }
+    if (category && category !== 'all') query = query.eq('category', category);
 
     const { data: posts, error, count } = await query;
-
     if (error) throw error;
 
-    const enrichedPosts = await Promise.all(
-      posts.map(async (post) => {
-        const [
-          { count: likeCount },
-          { count: commentCount },
-          { data: likedData }
-        ] = await Promise.all([
-          supabase.from('post_likes').select('*', { count: 'exact', head: true }).eq('post_id', post.id),
-          supabase.from('comments').select('*', { count: 'exact', head: true }).eq('post_id', post.id),
-          supabase.from('post_likes').select('user_id').eq('post_id', post.id).eq('user_id', userId).limit(1)
-        ]);
-
-        return {
-          ...post,
-          like_count: likeCount || 0,
-          comment_count: commentCount || 0,
-          is_liked: !!likedData?.length
-        };
-      })
-    );
+    const enrichedPosts = await enrichPosts(posts, userId);
 
     res.json({
       posts: enrichedPosts,
       total: count || posts.length
     });
   } catch (err) {
-    console.error("Feed error:", err);
+    console.error("Global feed error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// CITY FEED – UPDATED FOR REACTIONS
+router.get('/feed/city', async (req, res) => {
+  const currentCity = req.user.current_city?.trim();
+  if (!currentCity) return res.status(400).json({ error: 'Please set your city in profile first' });
+
+  const { category, page = 1 } = req.query;
+  const limit = 20;
+  const from = (page - 1) * limit;
+  const userId = req.auth.userId;
+
+  try {
+    let query = supabase
+      .from('posts')
+      .select(`
+        id, title, content, category, media_urls,
+        created_at, updated_at, user_id, is_anonymous
+      `)
+      .order('created_at', { ascending: false })
+      .limit(300); // Safe limit
+
+    if (category && category !== 'all') query = query.eq('category', category);
+
+    const { data: posts, error } = await query;
+    if (error) throw error;
+
+    const enriched = await enrichPosts(posts, userId);
+
+    const cityPosts = enriched.filter(post => {
+      if (post.is_anonymous || !post.city) return false;
+      return post.city.trim().toLowerCase() === currentCity.toLowerCase();
+    });
+
+    const paginated = cityPosts.slice(from, from + limit);
+
+    res.json({
+      posts: paginated,
+      total: cityPosts.length,
+      city: currentCity
+    });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -97,7 +185,7 @@ router.post('/posts/:id/react', async (req, res) => {
   const userId = req.auth.userId;
   const { reaction } = req.body; // "celebrate" | "heart" | "care" | "insightful" | "support"
 
-  const validReactions = ['celebrate', 'heart', 'care', 'insightful', 'support'];
+  const validReactions = ['celebrate', 'heart', 'care', 'insightful', 'like'];
   if (!validReactions.includes(reaction)) {
     return res.status(400).json({ error: 'Invalid reaction' });
   }
@@ -173,6 +261,14 @@ router.post('/posts/:id/comments', async (req, res) => {
   const { content, parent_id } = req.body;
   const postId = req.params.id;
   const userId = req.auth.userId;
+
+  const check = filterContent(content);
+  if (check.blocked) {
+    return res.status(400).json({
+      error: 'Comment blocked',
+      reason: check.reason
+    });
+  }
 
   const { data, error } = await supabase
     .from('comments')
@@ -360,22 +456,50 @@ router.get('/saved', async (req, res) => {
       .in('id', postIds);
 
     const enriched = await Promise.all(
-      posts.map(async (post) => {
-        const [{ count: likes = 0 }, { count: comments = 0 }, { data: liked }] = await Promise.all([
-          supabase.from('post_likes').select('*', { count: 'exact', head: true }).eq('post_id', post.id),
-          supabase.from('comments').select('*', { count: 'exact', head: true }).eq('post_id', post.id),
-          supabase.from('post_likes').select('user_id').eq('post_id', post.id).eq('user_id', userId).limit(1)
-        ]);
+  posts.map(async (post) => {
+    // Get reactions summary
+    const { data: reactionsData } = await supabase
+      .from('post_reactions')
+      .select('reaction_type')
+      .eq('post_id', post.id);
 
-        return {
-          ...post,
-          like_count: likes,
-          comment_count: comments,
-          is_liked: !!liked?.length,
-          saved_at: savedItems.find(s => s.post_id === post.id)?.created_at
-        };
-      })
-    );
+    const reactionCounts = {
+      celebrate: 0,
+      heart: 0,
+      care: 0,
+      insightful: 0,
+      like: 0
+    };
+
+    reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
+
+    const totalReactions = reactionsData.length;
+
+    // Get user's reactions
+    const { data: myReactionsData } = await supabase
+      .from('post_reactions')
+      .select('reaction_type')
+      .eq('post_id', post.id)
+      .eq('user_id', userId);
+
+    const myReactions = myReactionsData.map(r => r.reaction_type);
+
+    // Get comment count
+    const { count: commentCount } = await supabase
+      .from('comments')
+      .select('*', { count: 'exact', head: true })
+      .eq('post_id', post.id);
+
+    return {
+      ...post,
+      reaction_counts: reactionCounts,
+      total_reactions: totalReactions,
+      my_reactions: myReactions,
+      comment_count: commentCount || 0,
+      saved_at: savedItems.find(s => s.post_id === post.id)?.created_at
+    };
+  })
+);
 
     const ordered = savedItems
       .map(s => enriched.find(p => p.id === s.post_id))
@@ -389,6 +513,50 @@ router.get('/saved', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== LIKE / UNLIKE COMMENT ====================
+router.post('/comments/:id/like', async (req, res) => {
+  const commentId = req.params.id;
+  const userId = req.auth.userId;
+
+  // Check if already liked
+  const { data: existing } = await supabase
+    .from('comment_likes')
+    .select('id')
+    .eq('comment_id', commentId)
+    .eq('user_id', userId)
+    .single();
+
+  if (existing) {
+    // Unlike
+    await supabase.from('comment_likes').delete().eq('id', existing.id);
+    return res.json({ liked: false });
+  } else {
+    // Like
+    await supabase.from('comment_likes').insert({
+      comment_id: commentId,
+      user_id: userId
+    });
+
+    // Notify comment owner (if not self-like)
+    const { data: comment } = await supabase
+      .from('comments')
+      .select('user_id')
+      .eq('id', commentId)
+      .single();
+
+    if (comment && comment.user_id !== userId) {
+      await supabase.from('notifications').insert({
+        user_id: comment.user_id,
+        type: 'comment_like',
+        comment_id: commentId,
+        trigger_user_id: userId
+      });
+    }
+
+    return res.json({ liked: true });
   }
 });
 
