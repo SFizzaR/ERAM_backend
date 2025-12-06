@@ -1,55 +1,95 @@
+// utils/nodemailer.js
 const nodemailer = require("nodemailer");
 
-const sendMail = (email, emailToken) => {
+const sendMail = async (email, code) => {
+  // Use a proper transactional email service (RECOMMENDED: Resend, Mailgun, SES, etc.)
+  // For now, we'll make Gmail as safe as possible
+
   const transporter = nodemailer.createTransport({
     service: "gmail",
     host: "smtp.gmail.com",
     port: 587,
     secure: false,
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: process.env.EMAIL_USER,        // e.g. eram.tech.khi@gmail.com
+      pass: process.env.EMAIL_PASS,        // App Password (not regular password!)
     },
   });
-  const backendBaseURL = "http://localhost:3000"; // change to production URL later
-  const logoURL = `${backendBaseURL}/public/logo.png`;
-  const emailIconURL = `${backendBaseURL}/public/email.png`;
 
   const mailOptions = {
-    from: 'Team ERAM',
+    from: '"ERAM" <no-reply@eram.app>',           // This is what shows
+    sender: process.env.EMAIL_USER,               // Actual sending address
+    replyTo: "support@eram.app",                  // Where replies go
     to: email,
-    subject: 'ERAM - Email Verification',
+    subject: "Your ERAM Verification Code",
+    text: `Your verification code is ${code}\n\nThis code expires in 10 minutes.`, // Plain text fallback
     html: `
-    <div style="width:97%; text-align:center; font-family: Arial, sans-serif; padding:20px; background-color:#f9f9f9;">
-      <img src="${logoURL}" alt="Logo" style="width:70px; margin-bottom:15px;">
-      <div style="max-width:500px; margin:0 auto 20px auto; background-color:#CDC4D5; padding:20px; border-radius:8px;">
-        <img src="${emailIconURL}" alt="Email Illustration" style="width:90px; max-width:100%; height:auto;">
-      </div>
-      <p style="font-size:16px; color:#333; margin:10px 0;">Hi there!</p>
-      <p style="font-size:14px; color:#555; margin:10px 0;">Verify your email address by clicking on the button below:</p>
-      <p style="margin:20px 0;">
-        <a href="eram://verify-email?token=${emailToken}">
-           style="display:inline-block; padding:12px 24px; background-color:#007bff; color:#ffffff; text-decoration:none; border-radius:5px; font-size:14px; font-weight:bold;">
-          Click here to verify
-        </a>
-      </p>
-      <p style="font-size:12px; color:#777; margin-top:20px; line-height:1.5;">
-        If you didn't ask to verify this address, you can safely ignore this email.
-      </p>
-      <p style="font-size:14px; color:#333; margin-top:20px;">Thanks for signing up!</p>
-      <p style="font-size:14px; color:#333; margin-top:5px;">~ Team ERAM</p>
-    </div>
-  `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Your ERAM Verification Code</title>
+      </head>
+      <body style="margin:0;padding:0;background:#f6f9fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#f6f9fc;padding:20px">
+          <tr>
+            <td align="center">
+              <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.1)">
+                <!-- Header -->
+                <tr>
+                  <td style="background:linear-gradient(135deg,#5A31F4,#752ACA);padding:40px 30px;text-align:center">
+                    <h1 style="color:white;font-size:28px;margin:0">ERAM</h1>
+                  </td>
+                </tr>
+                <!-- Body -->
+                <tr>
+                  <td style="padding:40px 30px;text-align:center">
+                    <h2 style="color:#1a1a1a;margin-bottom:20px">Your Verification Code</h2>
+                    <div style="font-size:48px;font-weight:bold;letter-spacing:12px;color:#5A31F4;background:#f0eafc;padding:20px 40px;border-radius:12px;display:inline-block;margin:20px auto">
+                      ${code}
+                    </div>
+                    <p style="color:#555;font-size:16px;line-height:1.6;margin:30px 0">
+                      Enter this code in the app to verify your email address.<br>
+                      It expires in <strong>10 minutes</strong>.
+                    </p>
+                    <p style="color:#888;font-size:14px">
+                      If you didn't request this code, please ignore this email.
+                    </p>
+                  </td>
+                </tr>
+                <!-- Footer -->
+                <tr>
+                  <td style="background:#f9f9f9;padding:30px;text-align:center;color:#888;font-size:13px">
+                    <p style="margin:10px 0">
+                      © 2025 ERAM • Helping parents raise confident kids
+                    </p>
+                    <p style="margin:10px 0">
+                      Questions? Email <a href="mailto:eram.tech.khi@gmail.com" style="color:#5A31F4">support@eram.app</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `,
+    // These headers dramatically reduce spam score
+    headers: {
+      "X-Entity-ID": "eram-verification",
+      "List-Unsubscribe": "<mailto:unsubscribe@eram.app>",
+      "Precedence": "bulk",
+    },
   };
 
-
-  transporter.sendMail(mailOptions, function (error, info) {
-    if (error) {
-      console.log(error);
-    } else {
-      console.log('Email sent: ' + info.response);
-    }
-  });
-}
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("Verification email sent successfully");
+  } catch (error) {
+    console.error("Failed to send email:", error);
+  }
+};
 
 module.exports = sendMail;
