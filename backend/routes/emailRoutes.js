@@ -13,8 +13,11 @@ router.post("/send", async (req, res) => {
   let user = await User.findOne({ emailHash: hashEmail });
 
   if (user) {
-    return res.status(409).json({ message: "Email already registered" });
-  }
+      if (user.googleId) {
+        return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
+      }
+      return res.status(409).json({ message: "Email already registered" });
+    }
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   const expires = Date.now() + 10 * 60 * 1000; // 10 min
@@ -44,3 +47,4 @@ router.post("/send", async (req, res) => {
 
 
 module.exports = router;
+
