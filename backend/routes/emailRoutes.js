@@ -12,8 +12,8 @@ router.post("/send", async (req, res) => {
   const hashEmail = hashForLookup(email);
   let user = await User.findOne({ emailHash: hashEmail });
 
-  if (user && user.isVerifiedEmail) {
-    return res.status(400).json({ message: "Email already verified" });
+  if (user) {
+    return res.status(409).json({ message: "Email already registered" });
   }
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -41,5 +41,6 @@ router.post("/send", async (req, res) => {
     res.status(500).json({ error: "Failed to send email" });
   }
 });
+
 
 module.exports = router;
