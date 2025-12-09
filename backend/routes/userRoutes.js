@@ -149,7 +149,9 @@ router.post('/login', expressAsyncHandler(async (req, res) => {
         hashEmail = hashForLookup(email)
         // Find the user by email or username
         const user = await User.findOne({ emailHash: hashEmail });
-
+         if (user && user.googleId && !user.password) {
+            return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
+        }
         // Check if user exists and if the password matches
         if (user && (await bcrypt.compare(password, user.password))) {
             // Generate an access token
@@ -239,3 +241,4 @@ router.post('/google', async (req, res) => {
 });
 
 module.exports = router;
+
