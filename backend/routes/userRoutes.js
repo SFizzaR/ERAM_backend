@@ -153,6 +153,9 @@ router.post('/login', expressAsyncHandler(async (req, res) => {
             return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
         }
         // Check if user exists and if the password matches
+         if (user && !user.isVerifiedEmail) {
+            return res.status(400).json({ message: "Email not verified" });
+        }
         if (user && (await bcrypt.compare(password, user.password))) {
             // Generate an access token
             const accessToken = jwt.sign(
@@ -241,4 +244,5 @@ router.post('/google', async (req, res) => {
 });
 
 module.exports = router;
+
 
