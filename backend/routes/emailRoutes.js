@@ -1,7 +1,7 @@
 const express = require("express");
 const sendMail = require("../utils/nodemailer");
 const router = express.Router();
-const { hashForLookup } = require("../utils/crypto");
+const { hashForLookup, encrypt } = require("../utils/crypto");
 const User = require("../models/userModel")
 
 router.post("/send", async (req, res) => {
@@ -47,4 +47,5 @@ router.post("/send", async (req, res) => {
 
 
 module.exports = router;
+
 
