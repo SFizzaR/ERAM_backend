@@ -13,13 +13,23 @@ const REPORT_DELETE_THRESHOLD = 5;
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
-  const { title, content, category, media_urls = [], is_anonymous = false, post_type } = req.body;
+  const { title, content, category, media_urls = [], is_anonymous = false, post_type, feed_type } = req.body;  // UPDATED: Add feed_type
   const userId = req.auth.userId;
+  const currentCity = req.user.current_city?.trim();  // NEW: Get from Mongo user
 
   // Validate post_type
   const validTypes = ['query', 'insight'];
   if (post_type && !validTypes.includes(post_type)) {
     return res.status(400).json({ error: 'Invalid post_type. Must be "query" or "insight"' });
+  }
+
+  // NEW: Validate feed_type
+  const validFeeds = ['global', 'city'];
+  if (!validFeeds.includes(feed_type)) {
+    return res.status(400).json({ error: 'Invalid feed_type. Must be "global" or "city"' });
+  }
+  if (feed_type === 'city' && !currentCity) {
+    return res.status(400).json({ error: 'City required for city feed posts. Set your city in profile.' });
   }
 
   const tags = Array.isArray(req.body.tags) 
@@ -38,7 +48,17 @@ router.post('/posts', async (req, res) => {
 
   const { data, error } = await supabase
     .from('posts')
-    .insert({ user_id: userId, title, content, category: tags, media_urls, is_anonymous, post_type })
+    .insert({ 
+      user_id: userId, 
+      title, 
+      content, 
+      category: tags, 
+      media_urls, 
+      is_anonymous, 
+      post_type,
+      feed_type,  // NEW
+      city: feed_type === 'city' ? currentCity : null  // NEW: Store city for filtering
+    })
     .select()
     .single();
 
@@ -80,6 +100,11 @@ async function enrichPosts(posts, userId) {
         insightful: 0
       };
 
+      const now = new Date();
+const createdAt = new Date(post.created_at);
+const diffMs = now - createdAt;
+const timeRemaining = Math.max(0, 15 * 60 * 1000 - diffMs); // 15 minutes in ms
+
       reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
 
       const totalReactions = reactionsData.length;
@@ -99,20 +124,28 @@ async function enrichPosts(posts, userId) {
         .select('*', { count: 'exact', head: true })
         .eq('post_id', post.id);
 
+              console.log('post.user_id:', post.user_id, 'userId:', userId, 'isOwnPost:', post.user_id === userId);
+
+
       return {
         ...post,
         username: post.is_anonymous ? 'Anonymous' : profile.username || 'Unknown',
-        city: post.is_anonymous ? null : profile.current_city,
+        city: post.is_anonymous ? null : post.city || profile.current_city,  // UPDATED: Prefer post.city
         reaction_counts: reactionCounts,
         total_reactions: totalReactions,
         my_reactions: myReactions,
-        comment_count: commentCount || 0
+        comment_count: commentCount || 0,
+isOwnPost: post.user_id === userId,
+timeRemaining: post.user_id === userId ? timeRemaining : 0,
+canEditUndoDelete: post.user_id === userId && timeRemaining > 0,
+        
       };
+
     })
   );
 }
 
-// GLOBAL FEED – UPDATED FOR REACTIONS
+// GLOBAL FEED – FIXED
 router.get('/feed/global', async (req, res) => {
   const { category, page = 1 } = req.query;
   const limit = 20;
@@ -120,7 +153,6 @@ router.get('/feed/global', async (req, res) => {
   const userId = req.auth.userId;
 
   try {
-    // Exclude posts the current user has reported
     const { data: userReported } = await supabase
       .from('reports')
       .select('post_id')
@@ -131,19 +163,18 @@ router.get('/feed/global', async (req, res) => {
 
     let query = supabase
       .from('posts')
-      .select(`
-        id, title, content, category, media_urls,
-        created_at, updated_at, user_id, is_anonymous, post_type
-      `)
+      .select('id, title, content, category, media_urls, created_at, updated_at, user_id, is_anonymous, post_type, city, feed_type')
+      .eq('feed_type', 'global')
+      .eq('is_deleted', false)
       .order('created_at', { ascending: false })
       .range(from, from + limit - 1);
 
-    if (reportedIds.length) {
-      // exclude posts the user reported so they won't see them
+    if (reportedIds.length > 0) {
       query = query.not('id', 'in', `(${reportedIds.join(',')})`);
     }
-
-    if (category && category !== 'all') query = query.eq('category', category);
+    if (category && category !== 'all') {
+      query = query.eq('category', category);
+    }
 
     const { data: posts, error, count } = await query;
     if (error) throw error;
@@ -152,17 +183,18 @@ router.get('/feed/global', async (req, res) => {
 
     res.json({
       posts: enrichedPosts,
+      hasMore: posts.length === limit,
       total: count || posts.length
     });
   } catch (err) {
-    console.error("Global feed error:", err);
+    console.error('Global feed error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// CITY FEED – UPDATED FOR REACTIONS
+// CITY FEED – FIXED
 router.get('/feed/city', async (req, res) => {
-const currentCity = req.user.current_city?.trim();
+  const currentCity = req.user.current_city?.trim();
   if (!currentCity) return res.status(400).json({ error: 'Please set your city in profile first' });
 
   const { category, page = 1 } = req.query;
@@ -171,7 +203,6 @@ const currentCity = req.user.current_city?.trim();
   const userId = req.auth.userId;
 
   try {
-    // Exclude posts the current user has reported
     const { data: userReported } = await supabase
       .from('reports')
       .select('post_id')
@@ -182,37 +213,32 @@ const currentCity = req.user.current_city?.trim();
 
     let query = supabase
       .from('posts')
-      .select(`
-        id, title, content, category, media_urls,
-        created_at, updated_at, user_id, is_anonymous, post_type
-      `)
+      .select('id, title, content, category, media_urls, created_at, updated_at, user_id, is_anonymous, post_type, city, feed_type')
+      .eq('feed_type', 'city')
+      .eq('is_deleted', false)
+      .eq('city', currentCity)
       .order('created_at', { ascending: false })
-      .limit(300); // Safe limit
+      .range(from, from + limit - 1);
 
-    if (reportedIds.length) {
+    if (reportedIds.length > 0) {
       query = query.not('id', 'in', `(${reportedIds.join(',')})`);
     }
+    if (category && category !== 'all') {
+      query = query.eq('category', category);
+    }
 
-    if (category && category !== 'all') query = query.eq('category', category);
-
-    const { data: posts, error } = await query;
+    const { data: posts, error, count } = await query;
     if (error) throw error;
 
-    const enriched = await enrichPosts(posts, userId);
-
-    const cityPosts = enriched.filter(post => {
-      if (post.is_anonymous || !post.city) return false;
-      return post.city.trim().toLowerCase() === currentCity.toLowerCase();
-    });
-
-    const paginated = cityPosts.slice(from, from + limit);
+    const enrichedPosts = await enrichPosts(posts, userId);
 
     res.json({
-      posts: paginated,
-      total: cityPosts.length,
-      city: currentCity
+      posts: enrichedPosts,
+      hasMore: posts.length === limit,
+      total: count || posts.length
     });
   } catch (err) {
+    console.error('City feed error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -578,21 +604,31 @@ router.delete('/posts/:id', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
 
-  const { data: post } = await supabase
-    .from('posts')
-    .select('user_id')
-    .eq('id', postId)
-    .single();
+  try {
+    // Soft delete: only allow if user owns the post
+    const { data: post, error } = await supabase
+      .from('posts')
+      .update({
+        is_deleted: true,
+        deleted_at: new Date().toISOString(),
+        title: '[This post was deleted]',
+        content: '[This post was removed by the author]',
+        media_urls: [], // optional: clear media
+      })
+      .eq('id', postId)
+      .eq('user_id', userId)
+      .select()
+      .single();
 
-  if (!post || post.user_id !== userId) {
-    return res.status(403).json({ error: 'You can only delete your own post' });
+    if (error || !post) {
+      return res.status(404).json({ error: 'Post not found or not owned by you' });
+    }
+
+    res.json({ success: true, message: 'Post deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete post' });
   }
-
-  // Cascade delete (comments, likes, etc. via foreign keys)
-  const { error } = await supabase.from('posts').delete().eq('id', postId);
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ success: true });
 });
 
 // ==================== DELETE OWN COMMENT ====================
@@ -689,7 +725,9 @@ router.get('/saved', async (req, res) => {
     const { data: posts } = await supabase
       .from('posts')
       .select('id, title, content, category, media_urls, created_at, updated_at, user_id')
+      .eq('is_deleted', false)
       .in('id', postIds);
+      
 
     const enriched = await Promise.all(
       posts.map(async (post) => {
