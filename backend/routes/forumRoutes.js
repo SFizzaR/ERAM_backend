@@ -11,9 +11,8 @@ const getUserId = (req) => req.user._id.toString();
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
-const { title, content, category, media_urls = [], is_anonymous = false, post_type } = req.body;
-const userId = req.auth.userId;
-
+  const { title, content, category, media_urls = [], is_anonymous = false, post_type } = req.body;
+  const userId = req.auth.userId;
 
   // Validate post_type
   const validTypes = ['query', 'insight'];
@@ -23,7 +22,7 @@ const userId = req.auth.userId;
 
   const tags = Array.isArray(req.body.tags) 
   ? req.body.tags.join(',') 
-  : req.body.category || req.body.tags || ''; // fallback
+  : req.body.category || req.body.tags || ''; // send tags as comma-separated string or array → send category
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -72,11 +71,11 @@ async function enrichPosts(posts, userId) {
         .eq('post_id', post.id);
 
       const reactionCounts = {
+        like: 0,
+        support: 0,
         celebrate: 0,
-        heart: 0,
-        care: 0,
-        insightful: 0,
-        like: 0
+        love: 0,
+        insightful: 0
       };
 
       reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
@@ -147,7 +146,7 @@ router.get('/feed/global', async (req, res) => {
 
 // CITY FEED – UPDATED FOR REACTIONS
 router.get('/feed/city', async (req, res) => {
-  const currentCity = req.user.current_city?.trim();
+const currentCity = req.user.current_city?.trim();
   if (!currentCity) return res.status(400).json({ error: 'Please set your city in profile first' });
 
   const { category, page = 1 } = req.query;
@@ -193,9 +192,9 @@ router.get('/feed/city', async (req, res) => {
 router.post('/posts/:id/react', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
-  const { reaction } = req.body; // "celebrate" | "heart" | "care" | "insightful" | "support"
+  const { reaction } = req.body; // "like" | "support" | "celebrate" | "love" | "insightful"
 
-const validReactions = ['like', 'love', 'celebrate', 'support', 'insightful'];
+  const validReactions = ['like', 'support', 'celebrate', 'love', 'insightful'];
   if (!validReactions.includes(reaction)) {
     return res.status(400).json({ error: 'Invalid reaction' });
   }
@@ -245,11 +244,11 @@ router.get('/posts/:id/reactions', async (req, res) => {
     .eq('post_id', postId);
 
   const summary = {
+    like: 0,
+    support: 0,
     celebrate: 0,
-    heart: 0,
-    care: 0,
-    insightful: 0,
-    like: 0
+    love: 0,
+    insightful: 0
   };
 
   const userReactions = [];
@@ -280,6 +279,8 @@ router.post('/posts/:id/comments', async (req, res) => {
     });
   }
 
+  console.log('POST /posts/' + postId + '/comments payload:', { content, parent_id, userId });
+
   const { data, error } = await supabase
     .from('comments')
     .insert({
@@ -290,6 +291,8 @@ router.post('/posts/:id/comments', async (req, res) => {
     })
     .select()
     .single();
+
+  console.log('Inserted comment row:', data, 'error:', error);
 
   if (error) return res.status(400).json({ error: error.message });
 
@@ -474,11 +477,11 @@ router.get('/saved', async (req, res) => {
           .eq('post_id', post.id);
 
         const reactionCounts = {
+          like: 0,
+          support: 0,
           celebrate: 0,
-          heart: 0,
-          care: 0,
-          insightful: 0,
-          like: 0
+          love: 0,
+          insightful: 0
         };
 
         reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
@@ -532,23 +535,44 @@ router.post('/comments/:id/like', async (req, res) => {
   const userId = req.auth.userId;
 
   // Check if already liked
-  const { data: existing } = await supabase
+  const { data: existingList, error: existingErr } = await supabase
     .from('comment_likes')
-    .select('id')
+    .select('comment_id, user_id')
     .eq('comment_id', commentId)
     .eq('user_id', userId)
-    .single();
+    .limit(1);
+
+  if (existingErr) {
+    console.error('Like check error:', existingErr);
+    return res.status(500).json({ error: existingErr.message || 'DB error' });
+  }
+
+  const existing = existingList && existingList.length ? existingList[0] : null;
 
   if (existing) {
-    // Unlike
-    await supabase.from('comment_likes').delete().eq('id', existing.id);
-    return res.json({ liked: false });
+    // Unlike (delete any matching rows to be safe)
+    await supabase.from('comment_likes').delete().match({ comment_id: commentId, user_id: userId });
+    // Return authoritative counts for the comment after unlike
+    const { count } = await supabase
+      .from('comment_likes')
+      .select('*', { count: 'exact', head: true })
+      .eq('comment_id', commentId);
+
+    return res.json({ liked: false, total_likes: count || 0, is_liked_by_me: false });
   } else {
     // Like
     await supabase.from('comment_likes').insert({
       comment_id: commentId,
       user_id: userId
     });
+
+    // Return authoritative counts for the comment after like
+    const { count } = await supabase
+      .from('comment_likes')
+      .select('*', { count: 'exact', head: true })
+      .eq('comment_id', commentId);
+
+    return res.json({ liked: true, total_likes: count || 0, is_liked_by_me: true });
 
     // Notify comment owner (if not self-like)
     const { data: comment } = await supabase
@@ -590,6 +614,87 @@ router.get('/comments/:id/likes', async (req, res) => {
     total_likes: count || 0,
     is_liked_by_me: !!myLike?.length
   });
+});
+
+router.get('/posts/:id/comments', async (req, res) => {
+  const postId = req.params.id;
+  const userId = req.auth.userId;
+
+  try {
+    const { data: comments, error } = await supabase
+      .from('comments')
+      .select(`
+        id,
+        content,
+        created_at,
+        user_id,
+        parent_id,
+        post_id
+      `)
+      .eq('post_id', postId)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+
+    // Get usernames
+    const userIds = [...new Set(comments.map(c => c.user_id))];
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, username')
+      .in('id', userIds);
+
+    const profileMap = Object.fromEntries(profiles.map(p => [p.id, p.username]));
+
+    // Fetch likes for all comments in this post so we can return counts and whether the
+    // current user has liked each comment. This keeps the frontend in sync without
+    // extra round-trips.
+    const commentIds = comments.map(c => c.id);
+    let likesData = [];
+    if (commentIds.length) {
+      const { data: ld } = await supabase
+        .from('comment_likes')
+        .select('comment_id, user_id')
+        .in('comment_id', commentIds);
+      likesData = ld || [];
+    }
+
+    const likesCountMap = {};
+    const userLikedSet = new Set();
+    likesData.forEach(l => {
+      likesCountMap[l.comment_id] = (likesCountMap[l.comment_id] || 0) + 1;
+      if (l.user_id === userId) userLikedSet.add(l.comment_id);
+    });
+    // Build threaded structure
+    const commentMap = new Map();
+    const rootComments = [];
+
+    comments.forEach(comment => {
+      const enriched = {
+        id: comment.id,
+        content: comment.content,
+        author: profileMap[comment.user_id] || 'Anonymous',
+        timestamp: comment.created_at,
+        // Return authoritative like counts and whether current user liked
+        total_likes: likesCountMap[comment.id] || 0,
+        is_liked_by_me: !!userLikedSet.has(comment.id),
+        replies: [],
+        isOwnComment: comment.user_id === userId,
+      };
+
+      commentMap.set(comment.id, enriched);
+
+      if (!comment.parent_id) {
+        rootComments.push(enriched);
+      } else {
+        const parent = commentMap.get(comment.parent_id);
+        if (parent) parent.replies.push(enriched);
+      }
+    });
+
+    res.json({ comments: rootComments });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
