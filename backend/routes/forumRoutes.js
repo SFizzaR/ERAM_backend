@@ -8,6 +8,8 @@ const router = Router();
 router.use(protect); // All routes require logged-in user
 
 const getUserId = (req) => req.user._id.toString();
+// When a post/comment receives this many reports it will be auto-deleted
+const REPORT_DELETE_THRESHOLD = 5;
 
 // ==================== CREATE POST ====================
 router.post('/posts', async (req, res) => {
@@ -118,14 +120,28 @@ router.get('/feed/global', async (req, res) => {
   const userId = req.auth.userId;
 
   try {
+    // Exclude posts the current user has reported
+    const { data: userReported } = await supabase
+      .from('reports')
+      .select('post_id')
+      .eq('reporter_id', userId)
+      .eq('target_type', 'post');
+
+    const reportedIds = (userReported || []).map(r => r.post_id).filter(Boolean);
+
     let query = supabase
       .from('posts')
       .select(`
         id, title, content, category, media_urls,
         created_at, updated_at, user_id, is_anonymous, post_type
       `)
-      .range(from, from + limit - 1)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .range(from, from + limit - 1);
+
+    if (reportedIds.length) {
+      // exclude posts the user reported so they won't see them
+      query = query.not('id', 'in', `(${reportedIds.join(',')})`);
+    }
 
     if (category && category !== 'all') query = query.eq('category', category);
 
@@ -155,6 +171,15 @@ const currentCity = req.user.current_city?.trim();
   const userId = req.auth.userId;
 
   try {
+    // Exclude posts the current user has reported
+    const { data: userReported } = await supabase
+      .from('reports')
+      .select('post_id')
+      .eq('reporter_id', userId)
+      .eq('target_type', 'post');
+
+    const reportedIds = (userReported || []).map(r => r.post_id).filter(Boolean);
+
     let query = supabase
       .from('posts')
       .select(`
@@ -163,6 +188,10 @@ const currentCity = req.user.current_city?.trim();
       `)
       .order('created_at', { ascending: false })
       .limit(300); // Safe limit
+
+    if (reportedIds.length) {
+      query = query.not('id', 'in', `(${reportedIds.join(',')})`);
+    }
 
     if (category && category !== 'all') query = query.eq('category', category);
 
@@ -193,44 +222,101 @@ router.post('/posts/:id/react', async (req, res) => {
   const postId = req.params.id;
   const userId = req.auth.userId;
   const { reaction } = req.body; // "like" | "support" | "celebrate" | "love" | "insightful"
+  // Normalize reaction values to canonical set (accept legacy values)
+  const normalize = (r) => {
+    if (!r) return null;
+    if (r === 'heart' || r === 'care') return 'love';
+    return r;
+  };
 
+  const canonical = normalize(reaction);
   const validReactions = ['like', 'support', 'celebrate', 'love', 'insightful'];
-  if (!validReactions.includes(reaction)) {
+  if (canonical && !validReactions.includes(canonical)) {
     return res.status(400).json({ error: 'Invalid reaction' });
   }
 
-  // if user already reacted with this type → toggle
-  const { data: existing } = await supabase
-    .from('post_reactions')
-    .select('id')
-    .eq('post_id', postId)
-    .eq('user_id', userId)
-    .eq('reaction_type', reaction)
-    .single();
+  try {
+    // Check existing reaction by this user for the post
+    const { data: existingList, error: existingErr } = await supabase
+      .from('post_reactions')
+      .select('id, reaction_type')
+      .eq('post_id', postId)
+      .eq('user_id', userId)
+      .limit(1);
 
-  if (existing) {
-    await supabase.from('post_reactions').delete().eq('id', existing.id);
-    return res.json({ reacted: false, reaction });
-  } else {
-    await supabase.from('post_reactions').insert({
-      post_id: postId,
-      user_id: userId,
-      reaction_type: reaction
-    });
+    if (existingErr) throw existingErr;
 
-    // Notify post owner 
-    const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
-    if (post.user_id !== userId) {
-      await supabase.from('notifications').insert({
-        user_id: post.user_id,
-        type: 'reaction',
-        post_id: postId,
-        trigger_user_id: userId,
-        message: `${reaction}` 
-      });
+    const existing = existingList && existingList.length ? existingList[0] : null;
+
+    let reacted = false;
+
+    if (!canonical) {
+      // Explicit remove request: delete any existing reaction
+      if (existing) {
+        await supabase.from('post_reactions').delete().eq('id', existing.id);
+      }
+      reacted = false;
+    } else {
+      if (existing) {
+        if (existing.reaction_type === canonical) {
+          // same reaction -> toggle off
+          await supabase.from('post_reactions').delete().eq('id', existing.id);
+          reacted = false;
+        } else {
+          // different reaction -> update the existing row to the new type
+          await supabase.from('post_reactions').update({ reaction_type: canonical }).eq('id', existing.id);
+          reacted = true;
+        }
+      } else {
+        // insert new reaction
+        await supabase.from('post_reactions').insert({ post_id: postId, user_id: userId, reaction_type: canonical });
+        reacted = true;
+      }
     }
 
-    return res.json({ reacted: true, reaction });
+    // Compute authoritative counts and user's current reaction
+    const { data: allReactions } = await supabase
+      .from('post_reactions')
+      .select('reaction_type, user_id')
+      .eq('post_id', postId);
+
+    const summary = { like: 0, support: 0, celebrate: 0, love: 0, insightful: 0 };
+    let myReaction = null;
+    (allReactions || []).forEach(r => {
+      if (summary[r.reaction_type] !== undefined) summary[r.reaction_type]++;
+      if (r.user_id === userId) myReaction = r.reaction_type;
+    });
+
+    // Notify post owner if a reaction was added (not on unreact or change)
+    if (reacted && canonical) {
+      try {
+        const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
+        if (post && post.user_id && post.user_id !== userId) {
+          const { error: notifError } = await supabase
+  .from('notifications')
+  .insert({
+    user_id: post.user_id,
+    type: 'reaction',
+    post_id: postId,
+    trigger_user_id: userId,
+    read: false
+  });
+
+if (notifError) {
+  console.error('Failed to insert reaction notification:', notifError);
+} else {
+  console.log('Reaction notification successfully inserted for user:', post.user_id);
+}
+        }
+      } catch (notifErr) {
+        console.error('Failed to insert reaction notification:', notifErr);
+      }
+    }
+
+    return res.json({ reacted, reaction: canonical, counts: summary, total: (allReactions || []).length, my_reaction: myReaction });
+  } catch (err) {
+    console.error('React error:', err);
+    return res.status(500).json({ error: err.message || 'Server error' });
   }
 });
 
@@ -295,17 +381,79 @@ router.post('/posts/:id/comments', async (req, res) => {
   console.log('Inserted comment row:', data, 'error:', error);
 
   if (error) return res.status(400).json({ error: error.message });
-
   const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
-  if (post.user_id !== userId) {
-    await supabase.from('notifications').insert({
-      user_id: post.user_id,
-      type: 'reply',
-      post_id: postId,
-      comment_id: data.id,
-      trigger_user_id: userId
-    });
+  
+  console.log('Post data:', post, 'Commenter userId:', userId, 'parent_id:', parent_id);
+
+  
+
+  // Notify parent comment owner if this comment is a reply to another comment
+  if (parent_id) {
+    const { data: parentComment, error: parentError } = await supabase
+      .from('comments')
+      .select('user_id')
+      .eq('id', parent_id)
+      .single();
+
+    if (parentError) {
+      console.error('Failed to fetch parent comment:', parentError);
+    } else if (parentComment && parentComment.user_id !== userId) {
+      const { error: notifyError } = await supabase
+        .from('notifications')
+        .insert({
+          user_id: parentComment.user_id,
+          type: 'comment_reply',
+          post_id: postId,
+          comment_id: data.id,  // ← fixed: was newComment.id
+          trigger_user_id: userId,
+          message: 'replied to your comment',
+          read: false
+        });
+
+      if (notifyError) {
+        console.error('Failed to notify parent comment owner:', notifyError);
+      } else {
+        console.log('Reply notification sent to parent comment owner:', parentComment.user_id);
+      }
+    }
   }
+
+  // Also notify the post owner (if different from commenter and parent comment owner)
+    try {
+    const postOwnerId = post?.user_id;
+    let parentOwnerId = null;
+    if (parent_id) {
+      const { data: parentData } = await supabase
+        .from('comments')
+        .select('user_id')
+        .eq('id', parent_id)
+        .single();
+      parentOwnerId = parentData?.user_id || null;
+    }
+
+    if (postOwnerId && postOwnerId !== userId && postOwnerId !== parentOwnerId) {
+      console.log('Creating notification for post owner:', postOwnerId);
+      const { error: postNotifErr } = await supabase
+        .from('notifications')
+        .insert({
+          user_id: postOwnerId,
+          type: 'reply',
+          post_id: postId,
+          comment_id: data.id,  // ← fixed
+          trigger_user_id: userId,
+          read: false
+        });
+
+      if (postNotifErr) {
+        console.error('Failed to notify post owner:', postNotifErr);
+      } else {
+        console.log('Post owner notification created successfully');
+      }
+    }
+  } catch (e) {
+    console.error('Unexpected error notifying post owner:', e);
+  }
+
 
   res.status(201).json(data);
 });
@@ -315,6 +463,8 @@ router.get('/notifications', async (req, res) => {
   const userId = req.auth.userId;
 
   try {
+    console.log('GET /notifications for userId:', userId);
+    
     const { data, error } = await supabase
       .from('notifications')
       .select(`
@@ -325,7 +475,7 @@ router.get('/notifications', async (req, res) => {
         trigger_user_id,
         read,
         created_at,
-        posts!post_id (
+        posts (
           title,
           category
         )
@@ -335,7 +485,58 @@ router.get('/notifications', async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ notifications: data });
+    // Fetch trigger user profiles for all notifications
+    const triggerUserIds = [...new Set(data.map(n => n.trigger_user_id))];
+    let userProfiles = {};
+    
+    if (triggerUserIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .in('id', triggerUserIds);
+      
+      userProfiles = Object.fromEntries((profiles || []).map(p => [p.id, p.username]));
+    }
+
+    // Enrich notifications with usernames
+      let enrichedData = data.map(n => ({
+        ...n,
+        trigger_username: userProfiles[n.trigger_user_id] || 'Unknown'
+      }));
+
+      // For reaction notifications, try to derive the reaction string from post_reactions
+      try {
+        const reactionNotifs = enrichedData.filter(n => n.type === 'reaction' && n.post_id && n.trigger_user_id);
+        if (reactionNotifs.length) {
+          const postIds = [...new Set(reactionNotifs.map(n => n.post_id))];
+          const triggerIds = [...new Set(reactionNotifs.map(n => n.trigger_user_id))];
+
+          const { data: reactionsData } = await supabase
+            .from('post_reactions')
+            .select('post_id, user_id, reaction_type')
+            .in('post_id', postIds)
+            .in('user_id', triggerIds);
+
+          const reactionMap = {};
+          (reactionsData || []).forEach(r => {
+            reactionMap[`${r.post_id}_${r.user_id}`] = r.reaction_type;
+          });
+
+          enrichedData = enrichedData.map(n => {
+            if (n.type === 'reaction') {
+              const key = `${n.post_id}_${n.trigger_user_id}`;
+              const reaction = reactionMap[key];
+              return { ...n, message: reaction || null };
+            }
+            return n;
+          });
+        }
+      } catch (e) {
+        console.error('Failed to enrich reaction notifications with reaction_type:', e);
+      }
+
+    console.log('Notifications retrieved:', enrichedData);
+    res.json({ notifications: enrichedData });
 
   } catch (err) {
     console.error("Notifications error:", err);
@@ -436,8 +637,30 @@ router.post('/reports', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
+  // After inserting the report, count total reports for this target
+  const reportColumn = target_type === 'post' ? 'post_id' : 'comment_id';
+  const { count: totalReports } = await supabase
+    .from('reports')
+    .select('*', { count: 'exact', head: true })
+    .eq(reportColumn, target_id);
 
-  res.status(201).json(data);
+  let deleted = false;
+  try {
+    if ((totalReports || 0) >= REPORT_DELETE_THRESHOLD) {
+      // Auto-delete target when threshold is reached
+      if (target_type === 'post') {
+        await supabase.from('posts').delete().eq('id', target_id);
+        deleted = true;
+      } else {
+        await supabase.from('comments').delete().eq('id', target_id);
+        deleted = true;
+      }
+    }
+  } catch (delErr) {
+    console.error('Auto-delete error for reported target:', delErr);
+  }
+
+  res.status(201).json({ ...data, total_reports: totalReports || 0, deleted });
 });
 
 // ==================== GET ALL SAVED POSTS ====================
@@ -572,25 +795,27 @@ router.post('/comments/:id/like', async (req, res) => {
       .select('*', { count: 'exact', head: true })
       .eq('comment_id', commentId);
 
-    return res.json({ liked: true, total_likes: count || 0, is_liked_by_me: true });
-
     // Notify comment owner (if not self-like)
-    const { data: comment } = await supabase
-      .from('comments')
-      .select('user_id')
-      .eq('id', commentId)
-      .single();
+    try {
+      const { data: comment } = await supabase
+        .from('comments')
+        .select('user_id')
+        .eq('id', commentId)
+        .single();
 
-    if (comment && comment.user_id !== userId) {
-      await supabase.from('notifications').insert({
-        user_id: comment.user_id,
-        type: 'comment_like',
-        comment_id: commentId,
-        trigger_user_id: userId
-      });
+      if (comment && comment.user_id !== userId) {
+        await supabase.from('notifications').insert({
+          user_id: comment.user_id,
+          type: 'comment_like',
+          comment_id: commentId,
+          trigger_user_id: userId
+        });
+      }
+    } catch (notifErr) {
+      console.error('Failed to insert comment-like notification:', notifErr);
     }
 
-    return res.json({ liked: true });
+    return res.json({ liked: true, total_likes: count || 0, is_liked_by_me: true });
   }
 });
 
