@@ -11,6 +11,8 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.87.1",
+    "@vendia/serverless-express": "^4.12.6",
     "async-handler-express": "^0.2.4",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
