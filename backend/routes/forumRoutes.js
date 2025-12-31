@@ -700,7 +700,7 @@ router.post('/reports', async (req, res) => {
 });
 
 // ==================== GET ALL SAVED POSTS ====================
-router.get('/saved', async (req, res) => {
+router.get('/saved-posts', async (req, res) => {
   const userId = req.auth.userId;
   const page = parseInt(req.query.page) || 1;
   const limit = 20;
@@ -717,75 +717,36 @@ router.get('/saved', async (req, res) => {
 
     if (savedError) throw savedError;
     if (!savedItems?.length) {
-      return res.json({ savedPosts: [], total: 0 });
+      return res.json({ posts: [], total: 0 });
     }
 
     const postIds = savedItems.map(s => s.post_id);
 
-    const { data: posts } = await supabase
+    const { data: posts, error: postsError } = await supabase
       .from('posts')
-      .select('id, title, content, category, media_urls, created_at, updated_at, user_id')
+      .select('*')
       .eq('is_deleted', false)
       .in('id', postIds);
-      
 
-    const enriched = await Promise.all(
-      posts.map(async (post) => {
-        // Get reactions summary
-        const { data: reactionsData } = await supabase
-          .from('post_reactions')
-          .select('reaction_type')
-          .eq('post_id', post.id);
+    if (postsError) throw postsError;
 
-        const reactionCounts = {
-          like: 0,
-          support: 0,
-          celebrate: 0,
-          love: 0,
-          insightful: 0
-        };
+    const enriched = await enrichPosts(posts, userId);
 
-        reactionsData.forEach(r => reactionCounts[r.reaction_type]++);
-
-        const totalReactions = reactionsData.length;
-
-        // Get user's reactions
-        const { data: myReactionsData } = await supabase
-          .from('post_reactions')
-          .select('reaction_type')
-          .eq('post_id', post.id)
-          .eq('user_id', userId);
-
-        const myReactions = myReactionsData.map(r => r.reaction_type);
-
-        // Get comment count
-        const { count: commentCount } = await supabase
-          .from('comments')
-          .select('*', { count: 'exact', head: true })
-          .eq('post_id', post.id);
-
-        return {
-          ...post,
-          reaction_counts: reactionCounts,
-          total_reactions: totalReactions,
-          my_reactions: myReactions,
-          comment_count: commentCount || 0,
-          saved_at: savedItems.find(s => s.post_id === post.id)?.created_at
-        };
-      })
-    );
-
+    // Add saved_at and order by save date
     const ordered = savedItems
-      .map(s => enriched.find(p => p.id === s.post_id))
+      .map(s => {
+        const post = enriched.find(p => p.id === s.post_id);
+        return post ? { ...post, saved_at: s.created_at } : null;
+      })
       .filter(Boolean);
 
     res.json({
-      savedPosts: ordered,
+      posts: ordered,
       total: count || savedItems.length
     });
 
   } catch (err) {
-    console.error(err);
+    console.error('Saved posts error:', err);
     res.status(500).json({ error: err.message });
   }
 });
