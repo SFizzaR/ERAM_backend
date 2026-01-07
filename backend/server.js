@@ -12,7 +12,13 @@ const forumRoutes = require('./routes/forumRoutes')
 
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT;
+
+if (!port) {
+    console.error("❌ Render PORT is not defined. Exiting.");
+    process.exit(1);
+}
+
 
 // Middleware
 app.use(cors());
@@ -38,5 +44,6 @@ app.use('/public', express.static(path.join(__dirname, 'public')));
 app.listen(port, () => {
     console.log(`🚀 Server listening on port ${port}`);
 });
+
 
 
