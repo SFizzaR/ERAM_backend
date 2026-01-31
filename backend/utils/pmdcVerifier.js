@@ -16,36 +16,51 @@ const verifyPMDC = async (pmdcNumber) => {
     // Click search button
     await page.click('.fn-BtnDocRegNo');
 
-    // Wait for the tbody with results
-    await page.waitForSelector('#resultTBody tr', { timeout: 5000 }).catch(() => console.log("No results found"));
+    // Wait for results
+    await page.waitForSelector('#resultTBody tr', { timeout: 5000 });
 
-    // Extract the first row
-    const result = await page.evaluate(async () => {
+    // Extract row basic info
+    const rowData = await page.evaluate(() => {
         const row = document.querySelector('#resultTBody tr');
-        if (!row) return { found: false };
+        if (!row) return null;
 
-        const tds = row.querySelectorAll('td')
-
-        page.click('a.fn-viewdetail');
-        await page.waitForSelector('.modal-content', { visible: true });
-
-        const details = await page.evaluate(() => {
-            const validDate = document.querySelector('#license_valid').innerText.trim();
-            return { validDate };
-        });
+        const tds = row.querySelectorAll('td');
         return {
-            found: true,
             registrationNumber: tds[0]?.innerText.trim(),
             fullName: tds[1]?.innerText.trim(),
             fatherName: tds[2]?.innerText.trim(),
             status: tds[3]?.innerText.trim(),
-            validDate: details.validDate
+        };
+    });
+
+    if (!rowData) {
+        await browser.close();
+        return { found: false };
+    }
+
+    // Click "View Detail"
+    await page.click('a.fn-viewdetail');
+
+    // Wait for modal
+    await page.waitForSelector('.modal-dialog', { visible: true });
+
+    // Extract modal data
+    const modalData = await page.evaluate(() => {
+        const getText = selector =>
+            document.querySelector(selector)?.innerText.trim() || null;
+
+        return {
+            validDate: getText('#license_valid')
         };
     });
 
     await browser.close();
-    console.log(result);
-    return result;
+
+    return {
+        found: true,
+        ...rowData,
+        validDate: modalData.validDate
+    };
 };
 
 module.exports = { verifyPMDC };
