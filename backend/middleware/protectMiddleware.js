@@ -75,4 +75,31 @@ const protect = async (req, res, next) => {
   }
 };
 
-module.exports = { protect };
+const protectDoctor = async (req, res, next) => {
+  if (!req.headers.authorization?.startsWith("Bearer")) {
+    return res.status(401).json({ message: "No token" });
+  }
+
+  try {
+    const token = req.headers.authorization.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Only doctors allowed
+    if (!decoded.doctorId) {
+      return res.status(401).json({ message: "Invalid token role" });
+    }
+
+    const doctor = await Doctor.findById(decoded.doctorId);
+    if (!doctor) {
+      return res.status(401).json({ message: "Doctor not found" });
+    }
+
+    req.doctor = doctor;   // attach doctor identity
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Token invalid or expired" });
+  }
+};
+
+
+module.exports = { protect, protectDoctor };
