@@ -8,7 +8,8 @@ const path = require('path');
 const userRoutes = require('./routes/userRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const questionnaireRoutes = require('./routes/questionnaireRoutes');
-const forumRoutes = require('./routes/forumRoutes')
+const forumRoutes = require('./routes/forumRoutes');
+const doctorRoutes = require('./routes/doctorRoutes');
 
 
 const app = express();
@@ -34,6 +35,7 @@ app.use('/user', userRoutes);
 app.use('/email', emailRoutes);
 app.use('/questionnaire', questionnaireRoutes);
 app.use('/api/forum', forumRoutes)
+app.use('/doctor', doctorRoutes);
 
 
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -44,6 +46,7 @@ app.use('/public', express.static(path.join(__dirname, 'public')));
 app.listen(port, () => {
     console.log(`🚀 Server listening on port ${port}`);
 });
+
 
 
 
