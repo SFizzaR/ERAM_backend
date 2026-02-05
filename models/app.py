@@ -1,7 +1,10 @@
+import easyocr
 from flask import Flask, request, jsonify
 from tensorflow.keras.models import load_model
 import numpy as np
 import os
+import cv2
+from pmdc import extract_pmdc_from_ocr
 
 # =======================================
 # Initialize Flask app
@@ -22,6 +25,11 @@ model_adolescent = load_model(os.path.join(base_path, "AQ10_Adolescent", "adoles
 # Label Classes (no pickle needed)
 # =======================================
 label_classes = ['NO', 'YES']
+
+# =======================================
+# Initialize EasyOCR Reader
+# =======================================
+reader = easyocr.Reader(['en'])
 
 # =======================================
 # Prediction Route
@@ -97,7 +105,35 @@ def predict():
 @app.route('/')
 def index():
     return jsonify({'message': 'Autism Screening API is running 🚀'})
+# =======================================
+# PMDC Verification Route
+# =======================================
+@app.route('/pmdc_verification', methods=['POST'])
+def verification():
+    try:
+        image_file = request.files.get('image')
+        if not image_file:
+            return jsonify({'error': 'No image uploaded'}), 400
 
+        # 🔹 Convert FileStorage → numpy array
+        file_bytes = np.frombuffer(image_file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return jsonify({'error': 'Invalid image file'}), 400
+
+        # 🔹 OCR
+        ocr_results = reader.readtext(img)
+
+        # 🔹 Extract PMDC
+        pmdc_numbers = extract_pmdc_from_ocr(ocr_results)
+
+        return jsonify({
+            'pmdc_numbers': pmdc_numbers
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # =======================================
 # Run Flask App
