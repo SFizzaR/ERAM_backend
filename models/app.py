@@ -4,7 +4,7 @@ from tensorflow.keras.models import load_model
 import numpy as np
 import os
 import cv2
-from pmdc import extract_pmdc_from_ocr
+from pmdc import extract_name_and_registration
 
 # =======================================
 # Initialize Flask app
@@ -108,32 +108,33 @@ def index():
 # =======================================
 # PMDC Verification Route
 # =======================================
-@app.route('/pmdc_verification', methods=['POST'])
-def verification():
-    try:
-        image_file = request.files.get('image')
-        if not image_file:
-            return jsonify({'error': 'No image uploaded'}), 400
+@app.route("/extract", methods=["POST"])
+def extract():
 
-        # 🔹 Convert FileStorage → numpy array
-        file_bytes = np.frombuffer(image_file.read(), np.uint8)
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
 
-        if img is None:
-            return jsonify({'error': 'Invalid image file'}), 400
+    file = request.files["image"]
 
-        # 🔹 OCR
-        ocr_results = reader.readtext(img)
+    # Convert file to numpy array for OpenCV
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # 🔹 Extract PMDC
-        pmdc_numbers = extract_pmdc_from_ocr(ocr_results)
+    if image is None:
+        return jsonify({"error": "Invalid image file"}), 400
 
-        return jsonify({
-            'pmdc_numbers': pmdc_numbers
-        })
+    # OCR
+    ocr_results = reader.readtext(image)
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    # Extract fields
+    registration_number, name, fathername = extract_name_and_registration(ocr_results)
+
+    return jsonify({
+        "registration_number": registration_number,
+        "name": name,
+        "father_name": fathername
+    })
+
 
 # =======================================
 # Run Flask App
