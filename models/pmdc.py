@@ -1,6 +1,8 @@
+
+from typing import List, Tuple, Any
 import re
 
-# Helper to compute bbox center
+
 def bbox_stats(bbox):
     xs = [p[0] for p in bbox]
     ys = [p[1] for p in bbox]
@@ -9,96 +11,107 @@ def bbox_stats(bbox):
         "x_max": max(xs),
         "y_min": min(ys),
         "y_max": max(ys),
-        "x_center": sum(xs) / 4,
-        "y_center": sum(ys) / 4
+        "x_center": sum(xs) / len(xs),
+        "y_center": sum(ys) / len(ys)
     }
 
-# Relative position helpers
-def is_same_row(a, b, tolerance=40):
-    return abs(a["y_center"] - b["y_center"]) < tolerance
 
-def is_right_of(a, b):
-    return b["x_min"] > a["x_max"]
-
-# Normalize common OCR mistakes in text
-def normalize_text(text):
-    replacements = {
-        "YIDE": "VIDE",
-        "UIDE": "VIDE",
-        "PMECC": "PMDC",
-        "COUNCI": "COUNCIL",
-        "N0": "NO",
-    }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    return text
-
-# Regex pattern for PMDC number
-PMDC_REGEX = re.compile(r"\b[0-9A-Z]{4,6}[-–][0-9A-Z]\b")
+def is_vertically_aligned(a, b, tolerance=10):
+    return not (
+        b["y_max"] < a["y_min"] - tolerance or
+        b["y_min"] > a["y_max"] + tolerance
+    )
 
 
-def normalize_pmdc_format(raw):
-    raw = raw.upper().replace("–", "-")
-    if "-" not in raw:
-        return None
 
-    left, right = raw.split("-")
-
-    digit_map = {
-        "O": "0", "I": "1", "L": "1", "S": "5",
-        "B": "8", "G": "6", "Z": "2"
-    }
-    left_norm = "".join(digit_map.get(c, c) for c in left if c.isalnum())
-
-    letter_map = {
-        "0": "D", "5": "S", "1": "I",
-        "2": "Z", "8": "B", "6": "G"
-    }
-    right_norm = letter_map.get(right, right)
-
-    # 🔒 FINAL HARD RULES
-    if not left_norm.isdigit():
-        return None
-    if not right_norm.isalpha() or len(right_norm) != 1:
-        return None
-
-    return f"{left_norm}-{right_norm}"
+def is_right_of(label, candidate):
+    return candidate["x_min"] > label["x_max"]
 
 
-def generate_pmdc_variants(pmdc):
-    left, right = pmdc.split("-")
-    variants = {pmdc}
+def extract_name_and_registration(ocr_results):
+    import re
 
-    # If OCR confused last char
-    if right == "O":
-        variants.add(f"{left}-D")
-    elif right == "D":
-        variants.add(f"{left}-O")
-    elif right == "Q":
-        variants.add(f"{left}-O")
+    parsed = []
 
-    return list(variants)
+    for bbox, text, conf in ocr_results:
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
 
-def extract_pmdc_from_ocr(ocr_results):
-    label_bbox = None
-    pmdc_candidates = []
+        parsed.append({
+            "text": text.strip(),
+            "conf": float(conf),
+            "x_min": min(xs),
+            "x_max": max(xs),
+            "y_center": sum(ys) / len(ys)
+        })
 
-    # Step 1: Find label ("Vide No") and gather PMDC candidates
-    for bbox, text, confidence in ocr_results:
-        normalized_text = normalize_text(text)
+    registration_number = None
+    name = None
 
-        # Check if the normalized text contains "VIDE NO"
-        if "VIDE NO" in normalized_text:
-            label_bbox = bbox_stats(bbox)
+    # -------- FIND REGISTRATION --------
+    for item in parsed:
+        if re.search(r"registration number", item["text"], re.IGNORECASE):
+            label = item
+            break
+    else:
+        label = None
 
-        # Use regex to find potential PMDC formats
-        if PMDC_REGEX.search(normalized_text):
-            pmdc_candidates.append(normalize_pmdc_format(normalized_text))
+    if label:
+        right_side = [
+            p for p in parsed
+            if p["x_min"] > label["x_max"] and p["conf"] > 0.3
+        ]
 
-    # Step 2: Clean and validate PMDC candidates
-    valid_pmdcs = []
-    for candidate in pmdc_candidates:
-        candidate_variants = generate_pmdc_variants(candidate)
-        valid_pmdcs.extend(candidate_variants)
+        if right_side:
+            closest = min(
+                right_side,
+                key=lambda p: abs(p["y_center"] - label["y_center"])
+            )
+            registration_number = closest["text"]
 
-    return valid_pmdcs, label_bbox
+    # -------- FIND NAME --------
+    for item in parsed:
+        if re.fullmatch(r"name", item["text"].strip(), re.IGNORECASE):
+            label = item
+            break
+    else:
+        label = None
+
+    if label:
+        right_side = [
+            p for p in parsed
+            if p["x_min"] > label["x_max"] and p["conf"] > 0.3
+        ]
+
+        if right_side:
+            closest = min(
+                right_side,
+                key=lambda p: abs(p["y_center"] - label["y_center"])
+            )
+            name = closest["text"]
+
+    for item in parsed:
+        if re.search(r"father name", item["text"], re.IGNORECASE):
+            label = item
+            break
+    else:
+        label = None
+
+    if label:
+        right_side = [
+            p for p in parsed
+            if p["x_min"] > label["x_max"] and p["conf"] > 0.3
+        ]
+
+        if right_side:
+            closest = min(
+                right_side,
+                key=lambda p: abs(p["y_center"] - label["y_center"])
+            )
+            fathername = closest["text"]
+        
+    return registration_number, name, fathername
+
+
+
+__all__ = ["extract_name_and_registration"]
