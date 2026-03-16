@@ -1,20 +1,18 @@
-const { Router } = require('express');
-const { supabase } = require('../lib/supabase');
-const { protect } = require('../middleware/protectMiddleware');
-const User = require('../models/userModel');
+const expressAsyncHandler = require("express-async-handler");
+const express = require('express');
+const router = express.Router();
+const supabase = require('../config/supabaseAdmin');
 const { filterContent } = require('../utils/contentFilter');
+const { protect } = require("../middleware/protectMiddleware");
 
-const router = Router();
-router.use(protect); // All routes require logged-in user
 
-const getUserId = (req) => req.user._id.toString();
 // When a post/comment receives this many reports it will be auto-deleted
 const REPORT_DELETE_THRESHOLD = 5;
 
 // ==================== CREATE POST ====================
-router.post('/posts', async (req, res) => {
+router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
   const { title, content, category, media_urls = [], is_anonymous = false, post_type } = req.body;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   // Validate post_type
   const validTypes = ['query', 'insight'];
@@ -22,9 +20,9 @@ router.post('/posts', async (req, res) => {
     return res.status(400).json({ error: 'Invalid post_type. Must be "query" or "insight"' });
   }
 
-  const tags = Array.isArray(req.body.tags) 
-  ? req.body.tags.join(',') 
-  : req.body.category || req.body.tags || ''; // send tags as comma-separated string or array → send category
+  const tags = Array.isArray(req.body.tags)
+    ? req.body.tags.join(',')
+    : req.body.category || req.body.tags || ''; // send tags as comma-separated string or array → send category
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -44,7 +42,7 @@ router.post('/posts', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   res.status(201).json(data);
-});
+}));
 
 async function enrichPosts(posts, userId) {
   const uniqueUserIds = [...new Set(posts.map(p => p.user_id))];
@@ -113,11 +111,11 @@ async function enrichPosts(posts, userId) {
 }
 
 // GLOBAL FEED – UPDATED FOR REACTIONS
-router.get('/feed/global', async (req, res) => {
+router.get('/feed/global', protect, expressAsyncHandler(async (req, res) => {
   const { category, page = 1 } = req.query;
   const limit = 20;
   const from = (page - 1) * limit;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   try {
     // Exclude posts the current user has reported
@@ -158,17 +156,17 @@ router.get('/feed/global', async (req, res) => {
     console.error("Global feed error:", err);
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // CITY FEED – UPDATED FOR REACTIONS
-router.get('/feed/city', async (req, res) => {
-const currentCity = req.user.current_city?.trim();
+router.get('/feed/city', protect, expressAsyncHandler(async (req, res) => {
+  const currentCity = req.user.current_city?.trim();
   if (!currentCity) return res.status(400).json({ error: 'Please set your city in profile first' });
 
   const { category, page = 1 } = req.query;
   const limit = 20;
   const from = (page - 1) * limit;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   try {
     // Exclude posts the current user has reported
@@ -215,12 +213,12 @@ const currentCity = req.user.current_city?.trim();
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // ==================== React POST ====================
-router.post('/posts/:id/react', async (req, res) => {
+router.post('/posts/:id/react', protect, expressAsyncHandler(async (req, res) => {
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
   const { reaction } = req.body; // "like" | "support" | "celebrate" | "love" | "insightful"
   // Normalize reaction values to canonical set (accept legacy values)
   const normalize = (r) => {
@@ -293,20 +291,20 @@ router.post('/posts/:id/react', async (req, res) => {
         const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
         if (post && post.user_id && post.user_id !== userId) {
           const { error: notifError } = await supabase
-  .from('notifications')
-  .insert({
-    user_id: post.user_id,
-    type: 'reaction',
-    post_id: postId,
-    trigger_user_id: userId,
-    read: false
-  });
+            .from('notifications')
+            .insert({
+              user_id: post.user_id,
+              type: 'reaction',
+              post_id: postId,
+              trigger_user_id: userId,
+              read: false
+            });
 
-if (notifError) {
-  console.error('Failed to insert reaction notification:', notifError);
-} else {
-  console.log('Reaction notification successfully inserted for user:', post.user_id);
-}
+          if (notifError) {
+            console.error('Failed to insert reaction notification:', notifError);
+          } else {
+            console.log('Reaction notification successfully inserted for user:', post.user_id);
+          }
         }
       } catch (notifErr) {
         console.error('Failed to insert reaction notification:', notifErr);
@@ -318,11 +316,11 @@ if (notifError) {
     console.error('React error:', err);
     return res.status(500).json({ error: err.message || 'Server error' });
   }
-});
+}));
 
-router.get('/posts/:id/reactions', async (req, res) => {
+router.get('/posts/:id/reactions', protect, expressAsyncHandler(async (req, res) => {
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const { data } = await supabase
     .from('post_reactions')
@@ -349,13 +347,13 @@ router.get('/posts/:id/reactions', async (req, res) => {
     total: data?.length || 0,
     my_reactions: userReactions
   });
-});
+}));
 
 // ==================== ADD COMMENT ====================
-router.post('/posts/:id/comments', async (req, res) => {
+router.post('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) => {
   const { content, parent_id } = req.body;
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const check = filterContent(content);
   if (check.blocked) {
@@ -382,10 +380,10 @@ router.post('/posts/:id/comments', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId).single();
-  
+
   console.log('Post data:', post, 'Commenter userId:', userId, 'parent_id:', parent_id);
 
-  
+
 
   // Notify parent comment owner if this comment is a reply to another comment
   if (parent_id) {
@@ -419,7 +417,7 @@ router.post('/posts/:id/comments', async (req, res) => {
   }
 
   // Also notify the post owner (if different from commenter and parent comment owner)
-    try {
+  try {
     const postOwnerId = post?.user_id;
     let parentOwnerId = null;
     if (parent_id) {
@@ -456,15 +454,15 @@ router.post('/posts/:id/comments', async (req, res) => {
 
 
   res.status(201).json(data);
-});
+}));
 
 // ==================== GET NOTIFICATIONS ====================
-router.get('/notifications', async (req, res) => {
-  const userId = req.auth.userId;
+router.get('/notifications', protect, expressAsyncHandler(async (req, res) => {
+  const userId = req.user.id;
 
   try {
     console.log('GET /notifications for userId:', userId);
-    
+
     const { data, error } = await supabase
       .from('notifications')
       .select(`
@@ -488,52 +486,52 @@ router.get('/notifications', async (req, res) => {
     // Fetch trigger user profiles for all notifications
     const triggerUserIds = [...new Set(data.map(n => n.trigger_user_id))];
     let userProfiles = {};
-    
+
     if (triggerUserIds.length > 0) {
       const { data: profiles } = await supabase
         .from('profiles')
         .select('id, username')
         .in('id', triggerUserIds);
-      
+
       userProfiles = Object.fromEntries((profiles || []).map(p => [p.id, p.username]));
     }
 
     // Enrich notifications with usernames
-      let enrichedData = data.map(n => ({
-        ...n,
-        trigger_username: userProfiles[n.trigger_user_id] || 'Unknown'
-      }));
+    let enrichedData = data.map(n => ({
+      ...n,
+      trigger_username: userProfiles[n.trigger_user_id] || 'Unknown'
+    }));
 
-      // For reaction notifications, try to derive the reaction string from post_reactions
-      try {
-        const reactionNotifs = enrichedData.filter(n => n.type === 'reaction' && n.post_id && n.trigger_user_id);
-        if (reactionNotifs.length) {
-          const postIds = [...new Set(reactionNotifs.map(n => n.post_id))];
-          const triggerIds = [...new Set(reactionNotifs.map(n => n.trigger_user_id))];
+    // For reaction notifications, try to derive the reaction string from post_reactions
+    try {
+      const reactionNotifs = enrichedData.filter(n => n.type === 'reaction' && n.post_id && n.trigger_user_id);
+      if (reactionNotifs.length) {
+        const postIds = [...new Set(reactionNotifs.map(n => n.post_id))];
+        const triggerIds = [...new Set(reactionNotifs.map(n => n.trigger_user_id))];
 
-          const { data: reactionsData } = await supabase
-            .from('post_reactions')
-            .select('post_id, user_id, reaction_type')
-            .in('post_id', postIds)
-            .in('user_id', triggerIds);
+        const { data: reactionsData } = await supabase
+          .from('post_reactions')
+          .select('post_id, user_id, reaction_type')
+          .in('post_id', postIds)
+          .in('user_id', triggerIds);
 
-          const reactionMap = {};
-          (reactionsData || []).forEach(r => {
-            reactionMap[`${r.post_id}_${r.user_id}`] = r.reaction_type;
-          });
+        const reactionMap = {};
+        (reactionsData || []).forEach(r => {
+          reactionMap[`${r.post_id}_${r.user_id}`] = r.reaction_type;
+        });
 
-          enrichedData = enrichedData.map(n => {
-            if (n.type === 'reaction') {
-              const key = `${n.post_id}_${n.trigger_user_id}`;
-              const reaction = reactionMap[key];
-              return { ...n, message: reaction || null };
-            }
-            return n;
-          });
-        }
-      } catch (e) {
-        console.error('Failed to enrich reaction notifications with reaction_type:', e);
+        enrichedData = enrichedData.map(n => {
+          if (n.type === 'reaction') {
+            const key = `${n.post_id}_${n.trigger_user_id}`;
+            const reaction = reactionMap[key];
+            return { ...n, message: reaction || null };
+          }
+          return n;
+        });
       }
+    } catch (e) {
+      console.error('Failed to enrich reaction notifications with reaction_type:', e);
+    }
 
     console.log('Notifications retrieved:', enrichedData);
     res.json({ notifications: enrichedData });
@@ -542,19 +540,19 @@ router.get('/notifications', async (req, res) => {
     console.error("Notifications error:", err);
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // ==================== MARK NOTIFICATIONS READ ====================
-router.patch('/notifications/read', async (req, res) => {
-  const userId = req.auth.userId;
+router.patch('/notifications/read', protect, expressAsyncHandler(async (req, res) => {
+  const userId = req.user.id;
   await supabase.from('notifications').update({ read: true }).eq('user_id', userId);
   res.json({ success: true });
-});
+}));
 
 // ==================== SAVE / BOOKMARK POST (TOGGLE) ====================
-router.post('/posts/:id/saveBookmark', async (req, res) => {
+router.post('/posts/:id/saveBookmark', protect, expressAsyncHandler(async (req, res) => {
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const { data: existing } = await supabase
     .from('saved_posts')
@@ -564,19 +562,19 @@ router.post('/posts/:id/saveBookmark', async (req, res) => {
     .single();
 
   if (existing) {
-    
+
     await supabase.from('saved_posts').delete().match({ post_id: postId, user_id: userId });
     res.json({ saved: false });
   } else {
     await supabase.from('saved_posts').insert({ post_id: postId, user_id: userId });
     res.json({ saved: true });
   }
-});
+}));
 
 // ==================== DELETE OWN POST ====================
-router.delete('/posts/:id', async (req, res) => {
+router.delete('/posts/:id', protect, expressAsyncHandler(async (req, res) => {
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const { data: post } = await supabase
     .from('posts')
@@ -593,12 +591,12 @@ router.delete('/posts/:id', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   res.json({ success: true });
-});
+}));
 
 // ==================== DELETE OWN COMMENT ====================
-router.delete('/comments/:id', async (req, res) => {
+router.delete('/comments/:id', protect, expressAsyncHandler(async (req, res) => {
   const commentId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const { data: comment } = await supabase
     .from('comments')
@@ -614,12 +612,12 @@ router.delete('/comments/:id', async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   res.json({ success: true });
-});
+}));
 
 // ==================== REPORT POST OR COMMENT ====================
-router.post('/reports', async (req, res) => {
+router.post('/reports', protect, expressAsyncHandler(async (req, res) => {
   const { target_type, target_id, reason } = req.body;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   if (!['post', 'comment'].includes(target_type) || !target_id || !reason) {
     return res.status(400).json({ error: 'Invalid report: need target_type (post/comment), target_id, reason' });
@@ -661,11 +659,11 @@ router.post('/reports', async (req, res) => {
   }
 
   res.status(201).json({ ...data, total_reports: totalReports || 0, deleted });
-});
+}));
 
 // ==================== GET ALL SAVED POSTS ====================
-router.get('/saved', async (req, res) => {
-  const userId = req.auth.userId;
+router.get('/saved', protect, expressAsyncHandler(async (req, res) => {
+  const userId = req.user.id;
   const page = parseInt(req.query.page) || 1;
   const limit = 20;
   const from = (page - 1) * limit;
@@ -750,12 +748,12 @@ router.get('/saved', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // ==================== LIKE / UNLIKE COMMENT ====================
-router.post('/comments/:id/like', async (req, res) => {
+router.post('/comments/:id/like', protect, expressAsyncHandler(async (req, res) => {
   const commentId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   // Check if already liked
   const { data: existingList, error: existingErr } = await supabase
@@ -817,11 +815,11 @@ router.post('/comments/:id/like', async (req, res) => {
 
     return res.json({ liked: true, total_likes: count || 0, is_liked_by_me: true });
   }
-});
+}));
 
-router.get('/comments/:id/likes', async (req, res) => {
+router.get('/comments/:id/likes', protect, expressAsyncHandler(async (req, res) => {
   const commentId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   const { count } = await supabase
     .from('comment_likes')
@@ -839,11 +837,11 @@ router.get('/comments/:id/likes', async (req, res) => {
     total_likes: count || 0,
     is_liked_by_me: !!myLike?.length
   });
-});
+}));
 
-router.get('/posts/:id/comments', async (req, res) => {
+router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) => {
   const postId = req.params.id;
-  const userId = req.auth.userId;
+  const userId = req.user.id;
 
   try {
     const { data: comments, error } = await supabase
@@ -920,6 +918,6 @@ router.get('/posts/:id/comments', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 module.exports = router;
