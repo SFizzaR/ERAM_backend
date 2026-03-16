@@ -36,7 +36,7 @@ app.get('/test-db', async (req, res) => {
 app.use('/user', userRoutes);
 app.use('/email', emailRoutes);
 app.use('/questionnaire', questionnaireRoutes);
-app.use('/api/forum', forumRoutes);
+app.use('/forum', forumRoutes);
 app.use('/doctor', doctorRoutes);
 
 app.use('/public', express.static(path.join(__dirname, 'public')));
