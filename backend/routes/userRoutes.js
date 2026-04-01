@@ -160,11 +160,13 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
     const hashEmail = hashForLookup(email);
 
     // Lookup profile in Supabase
-    let { data: user, error } = await supabase
+    let { data: users, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('email_hash', hashEmail)
-        .single();
+        .limit(1);
+
+    let user = users?.[0] || null;
 
     if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
         return res.status(500).json({ message: "Server error", error: error.message });
@@ -192,15 +194,15 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
 
     } else if (!user.google_id) {
         // Link Google account
-        const { data: linkedUser, error: updateError } = await supabase
+        const { data: linkedUsers, error: updateError } = await supabase
             .from('profiles')
             .update({ google_id: googleId })
             .eq('email_hash', hashEmail)
-            .select()
-            .single();
+            .select('*')
+            .limit(1);
 
         if (updateError) return res.status(500).json({ message: "Server error", error: updateError.message });
-        user = linkedUser;
+        user = linkedUsers?.[0] || user;
     }
 
     // Generate backend JWT
