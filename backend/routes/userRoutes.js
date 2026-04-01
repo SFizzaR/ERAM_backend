@@ -1,247 +1,387 @@
-const expressAsyncHandler = require("express-async-handler");
 const express = require('express');
-const User = require("../models/userModel");
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
 const router = express.Router();
-const { protect } = require("../middleware/protectMiddleware")
+const expressAsyncHandler = require("express-async-handler");
 const { hashForLookup, encrypt, decrypt } = require("../utils/crypto");
-const { calculateAge } = require("../utils/ageCalculator")
+const { calculateAge } = require("../utils/ageCalculator");
+const supabase = require('../config/supabaseAdmin');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { protect } = require("../middleware/protectMiddleware");
 
 router.post('/register', expressAsyncHandler(async (req, res) => {
-    try {
-        const { email, password, city, language, username, child } = req.body;
+    const { email, password, city, language, username, child } = req.body;
 
-        if (!email || !password || !city || !language || !username || !child) {
-            res.status(400).json({ message: "All fields are mandatory" });
-            return;
-        }
-        const hashEmail = hashForLookup(email)
-        const user = await User.findOne({ emailHash: hashEmail });
-        if (!user) {
-            return res.status(404).json({ message: "User not found" });
-        }
-        if (!user.isVerifiedEmail) {
-            return res.status(400).json({ message: "Email not verified" });
-        }
-        if (user.password) {
-            return res.status(400).json({ message: "User already registered" });
-        }
+    if (!email || !password || !city || !language || !username || !child) {
+        return res.status(400).json({ message: "All fields are mandatory" });
+    }
 
-        // Hash the password
-        const hashPassword = await bcrypt.hash(password, 10);
-        const age = calculateAge(child.dateOfBirth)
+    const hashEmail = hashForLookup(email);
 
-        if (age === null) {
-            return res.status(400).json({ message: "Invalid date of birth" });
-        }
+    // Supabase query
+    const { data: user, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('email_hash', hashEmail)
+        .single();
+    if (error || !user) return res.status(404).json({ message: "User not found" });
+    if (!user.is_verified_email) return res.status(400).json({ message: "Email not verified" });
 
-        user.password = hashPassword;
-        user.current_city = city;
-        user.preferred_language = language;
-        user.username = username;
-        user.children = [{ ...child, age }];
+    const age = calculateAge(child.dateOfBirth);
+    if (age === null) return res.status(400).json({ message: "Invalid date of birth" });
+    if (user.username) {
+        return res.status(400).json({ message: "User already registered" });
+    }
 
-        await user.save();
+    const { data: updated, error: authError } = await supabase.auth.admin.updateUserById(
+        user.id,  // e.g. updatedUser.supabase_uid from your profiles query
+        { password: password }  // plain text new password
+    );
 
-        const accessToken = jwt.sign(
-            {
-                user: {
-                    id: user._id,
-                }
-            },
-            process.env.JWT_SECRET,
-            { expiresIn: "1h" }
-        );
+    if (authError) {
+        console.error("Supabase auth password update error:", authError);
+        return res.status(500).json({ message: "Failed to update password in Supabase Auth", error: authError.message });
+    }
+    // Update profile
+    const { data: updatedUser, error: updateError } = await supabase
+        .from('profiles')
+        .update({
+            username,
+            current_city: city,
+            preferred_language: language,
+        })
+        .eq('email_hash', hashEmail)
+        .select()
+        .single();
 
-        res.status(201).json({
-            _id: user.id,
-            username: user.username,
-            email: decrypt(user.email),
-            accessToken
+    if (updateError) return res.status(500).json({ error: updateError.message });
+    const { error: childInsertError } = await supabase
+        .from('children').insert({
+            name: child.name,
+            date_of_birth: child.dateOfBirth,
+            user_id: updatedUser.id
         });
+    if (childInsertError) {
+        console.error("Failed to insert child:", childInsertError);
+        return res.status(500).json({ message: "Failed to add child", error: childInsertError.message });
     }
-    catch (err) {
-        res.status(500).json({ message: "Server error", error: err.message });
+    const accessToken = jwt.sign(
+        { user: { id: updatedUser.id } },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" }
+    );
 
-    }
-
-}));
-
-router.get('/me', protect, expressAsyncHandler(async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select('-password -emailHash'); // Exclude sensitive fields
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    res.json({
-      _id: user._id,
-      email: decrypt(user.email), // Assuming you decrypt email
-      username: user.username,
-      // Add other fields as needed
+    res.status(201).json({
+        _id: updatedUser.id,
+        username: updatedUser.username,
+        email: decrypt(updatedUser.email),
+        accessToken
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 }));
 
-router.put('/updateUser', protect, expressAsyncHandler(async (req, res) => {
+// -------------------- VERIFY EMAIL --------------------
+router.post("/verifyemail", expressAsyncHandler(async (req, res) => {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+        return res.status(400).json({ message: "Email and code are required" });
+    }
+
+    const hashEmail = hashForLookup(email);
+    // Fetch only the fields we actually need
+    const { data: user, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('email_hash', hashEmail)
+        .single();
+
+    if (error || !user) {
+        return res.status(404).json({ message: "User not found" });
+    }
+    // ────────────────────────────────────────────────
+    //          Core verification logic
+    // ────────────────────────────────────────────────
+
+
+    const codeMatches = user.email_verification_code === code;
+    // ────────────────────────────────────────────────
+    //          Decision
+    // ────────────────────────────────────────────────
+    if (!codeMatches) {
+        return res.status(400).json({ message: "Invalid code" });
+    }
+
+    if (new Date() > new Date(user.email_verification_expires)) {
+        return res.status(400).json({ message: "OTP expired" });
+
+    }
+    // If already verified → you may want to allow or reject depending on your policy
+    if (user.is_verified_email === true) {
+        return res.status(200).json({ message: "Email already verified" });
+    }
+    if (error || !user) {
+        return res.status(404).json({ message: "User profile not found" });
+    }
+
+    // ────────────────────────────────────────────────
+    //          Success – update profile
+    // ────────────────────────────────────────────────
+    const { error: authError } = await supabase.auth.admin.updateUserById(user.id, {
+        email_confirm: true  // ✅ correct field name
+    });
+
+    if (authError) {
+        return res.status(500).json({ message: "Failed to confirm email", error: authError.message });
+    }
+    const { data: updated, error: updateError } = await supabase
+        .from('profiles')
+        .update({
+            email_verification_code: null, // Clear token after successful verification
+            is_verified_email: true
+        })
+        .eq('email_hash', hashEmail);
+
+    if (updateError) {
+        console.error("Supabase update error:", updateError);
+        return res.status(500).json({ message: "Failed to update password in Supabase Auth", error: authError.message });
+    }
+
+
+    return res.status(200).json({
+        message: "Email verified successfully", // optional – return minimal safe data
+    });
+}));
+// -------------------- GOOGLE LOGIN --------------------
+router.post('/google', expressAsyncHandler(async (req, res) => {
+    const { email, googleId, name } = req.body;
+    if (!email || !googleId) {
+        return res.status(400).json({ message: "Email and googleId are required" });
+    }
+
+    const hashEmail = hashForLookup(email);
+
+    // Lookup profile in Supabase
+    let { data: user, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('email_hash', hashEmail)
+        .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
+        return res.status(500).json({ message: "Server error", error: error.message });
+    }
+
+    if (!user) {
+        // Create new profile
+        const { data: newUser, error: insertError } = await supabase
+            .from('profiles')
+            .insert([{
+                email: encrypt(email),
+                email_hash: hashEmail,
+                google_id: googleId,
+                username: name,
+                current_city: '',
+                preferred_language: 'en',
+                is_verified_email: true
+            }])
+            .select()
+            .single();
+
+
+        if (insertError) return res.status(500).json({ message: "Server error", error: insertError.message });
+        user = newUser;
+
+    } else if (!user.google_id) {
+        // Link Google account
+        const { data: linkedUser, error: updateError } = await supabase
+            .from('profiles')
+            .update({ google_id: googleId })
+            .eq('email_hash', hashEmail)
+            .select()
+            .single();
+
+        if (updateError) return res.status(500).json({ message: "Server error", error: updateError.message });
+        user = linkedUser;
+    }
+
+    // Generate backend JWT
+    const token = jwt.sign(
+        { user: { id: user.id } },
+        process.env.JWT_SECRET,
+        { expiresIn: '1h' }
+    );
+
+    let safeEmail = user.email;
     try {
-        const { language, city, username } = req.body
-        const updateUser = await User.findByIdAndUpdate(
-            req.user.id,
-            {
-                $set: {
-                    ...(username && { username: username }),
-                    ...(city && { current_city: city }),
-                    ...(language && { preferred_language: language }),
-                }
-            },
-            { new: true }
-        )
-        res.json(updateUser);
+        safeEmail = decrypt(user.email);
+    } catch (e) {
+        // Keep legacy/plain email values if decryption fails.
+        safeEmail = user.email;
     }
 
-    catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-}))
-
-router.put('/addChildren', protect, expressAsyncHandler(async (req, res) => {
-    try {
-        const children = req.body.children; // expecting an array
-        if (!children || children.length === 0) {
-            return res.status(400).json({ message: "No children to add" });
-        }
-        children.forEach((child, index) => {
-            const age = calculateAge(child.dateOfBirth);
-            if (age === null) {
-                return res.status(400).json({ message: `Invalid date of birth for child ${index + 1}` });
-            }
-            child.age = age;
-        });
-
-        const updatedUser = await User.findByIdAndUpdate(
-            req.user.id,
-            {
-                $push: { children: { $each: children } } // push multiple children
-            },
-            { new: true } // return updated document
-        );
-
-        res.json(updatedUser);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.status(201).json({
+        _id: user.id,
+        email: safeEmail,
+        username: user.username,
+        token,
+    });
 }));
 
 router.post('/login', expressAsyncHandler(async (req, res) => {
-    try {
-        const { email, password } = req.body;
+    const { email, password } = req.body;
 
-        // Check for missing fields
-        if (!email && !password) {
-            res.status(400).json({ message: "Input correct credentials for login" });
-            return; // Ensure no further code runs
-        }
-
-
-        hashEmail = hashForLookup(email)
-        // Find the user by email or username
-        const user = await User.findOne({ emailHash: hashEmail });
-         if (user && user.googleId && !user.password) {
-            return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
-        }
-        // Check if user exists and if the password matches
-         if (user && !user.isVerifiedEmail) {
-            return res.status(400).json({ message: "Email not verified" });
-        }
-        if (user && (await bcrypt.compare(password, user.password))) {
-            // Generate an access token
-            const accessToken = jwt.sign(
-                { user: { id: user._id } }, // ✅ Change `user.id` to `user._id`
-                process.env.JWT_SECRET,
-                { expiresIn: "1h" }
-            );
-
-
-            res.status(200).json({
-                _id: user.id,
-                email: decrypt(user.email),
-                accessToken,
-            });
-
-
-        } else {
-            res.status(401).json({ message: "Invalid credentials" });
-        }
+    if (!email || !password) {
+        return res.status(400).json({ message: "Email and password are required" });
     }
-    catch (err) {
-        res.status(500).json({ error: err.message });
 
+    const hashEmail = hashForLookup(email);
+
+    // Optional: Check if profile exists first (for better error messages)
+    const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, google_id, is_verified_email, username, email') // select only needed fields
+        .eq('email_hash', hashEmail)
+        .single();
+
+    if (profileError || !profile) {
+        return res.status(404).json({ message: "User not found" });
+    }
+
+    if (profile.google_id) {
+        return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
+    }
+
+    if (!profile.is_verified_email) {
+        return res.status(400).json({ message: "Email not verified" });
+    }
+
+    // Attempt login via Supabase Auth (this verifies password server-side)
+    const { data: { user, session }, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password: password,
+    });
+
+    if (signInError || !user || !session) {
+        console.error("Sign in error:", signInError);
+        // Supabase returns specific messages like "Invalid login credentials"
+        return res.status(401).json({ message: signInError?.message || "Invalid credentials" });
+    }
+
+    // Optional: If you want to double-check email confirmed (though signInWithPassword requires it)
+    if (!user.email_confirmed_at) {
+        return res.status(400).json({ message: "Email not verified" });
+    }
+
+    // Generate your custom JWT if needed (or just return Supabase's session.access_token)
+    const accessToken = jwt.sign(
+        { user: { id: user.id } },
+        process.env.JWT_SECRET,
+        { expiresIn: '1h' }
+    );
+
+    res.status(200).json({
+        _id: user.id,                           // or profile.supabase_uid if different
+        email: decrypt(profile.email),
+        username: profile.username,
+        accessToken,                            // your JWT
+        // Optional: session: session.access_token  // Supabase session token if you prefer
+    });
+}));
+
+router.put('/changepassword', protect, expressAsyncHandler(async (req, res) => {
+    const { password } = req.body;
+    if (!password) {
+        return res.status(400).json({ message: "New password is required" });
+    }
+    const { data, error } = await supabase.auth.admin.updateUserById(
+        req.user.id,                // from auth.users.id
+        { password: password }  // plain text — Supabase hashes it
+    );
+    if (error) {
+        console.error("Supabase auth password update error:", error);
+        return res.status(500).json({ message: "Failed to update password in Supabase Auth", error: error.message });
+    }
+    res.status(200).json({ message: "Password updated successfully" });
+}));
+// Update user profile
+router.put('/updateUser', protect, expressAsyncHandler(async (req, res) => {
+    try {
+        const { language, city, username } = req.body;
+        // Build update object dynamically
+        const updates = {
+            ...(username && { username }),
+            ...(city && { current_city: city }),
+            ...(language && { preferred_language: language })
+        };
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ message: "No fields to update" });
+        }
+
+        // Update user in Supabase
+        const { data: updatedUser, error } = await supabase
+            .from('profiles')
+            .update(updates)
+            .eq('id', req.user.id)
+            .select()
+            .single();
+
+        if (error) return res.status(500).json({ message: "Update failed", error: error.message });
+
+        res.json({
+            id: updatedUser.id,
+            username: updatedUser.username,
+            current_city: updatedUser.current_city,
+            preferred_language: updatedUser.preferred_language,
+            email: decrypt(updatedUser.email),
+        });
+
+    } catch (err) {
+        res.status(500).json({ message: "Server error", error: err.message });
     }
 }));
 
-router.post("/verifyemail", async (req, res) => {
-
-    const { email, code } = req.body;
-  const hashEmail = hashForLookup(email);
-  const user = await User.findOne({ emailHash: hashEmail });
-
-  if (!user || user.emailVerificationCode !== code || Date.now() > user.emailVerificationExpires) {
-    return res.status(400).json({ message: "Invalid or expired code" });
-  }
-
-  user.isVerifiedEmail = true;
-  user.emailVerificationCode = null;
-  user.emailVerificationExpires = null;
-  await user.save();
-
-  res.json({ message: "Verified" });
-});
-
-router.post('/google', async (req, res) => {
-    const { email, googleId, name } = req.body;
-
+// Get current logged-in user
+router.get('/me', protect, expressAsyncHandler(async (req, res) => {
     try {
-        const plainEmail = email;
-        const hashEmail = hashForLookup(plainEmail);
-        let user = await User.findOne({ emailHash: hashEmail });  
+        // Lookup user in Supabase by profile id from JWT
+        const { data: user, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', req.user.id)
+            .single();
 
-        if (!user) {
-            user = new User({  
-                email: encrypt(plainEmail),
-                emailHash: hashEmail,
-                googleId,
-                username: name,  
-                current_city: '',  
-                preferred_language: 'en',  
-                children: []  
-            });
-            await user.save();
-        } else if (!user.googleId) {
-            user.googleId = googleId;
-            await user.save();
-            console.log(`Linked Google account for user ${user._id}`);
+        if (error || !user) {
+            return res.status(404).json({ message: 'User not found' });
         }
 
-        const token = jwt.sign(
-            { user: { id: user._id } },
-            process.env.JWT_SECRET,
-            { expiresIn: '1h' }
-        );
+        const childrenResult = await supabase
+            .from('children')
+            .select('name, date_of_birth')
+            .eq('user_id', user.id);
+        if (childrenResult.error) {
+            console.error("Failed to fetch children:", childrenResult.error);
+            return res.status(500).json({ message: "Failed to fetch children", error: childrenResult.error.message });
+        }
 
-        res.status(201).json({
-            _id: user._id,  // Fixed: _id
-            email: decrypt(user.email),
+        let safeEmail = user.email;
+        try {
+            safeEmail = decrypt(user.email);
+        } catch (e) {
+            safeEmail = user.email;
+        }
+
+        res.json({
+            _id: user.id,
+            email: safeEmail,
             username: user.username,
-            token,
+            current_city: user.current_city,
+            preferred_language: user.preferred_language,
+            children: childrenResult.data,
         });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
+        res.status(500).json({ message: "Server error", error: err.message });
     }
-});
+}));
+
 
 module.exports = router;
-
