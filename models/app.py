@@ -110,30 +110,17 @@ def index():
 # =======================================
 @app.route("/extract", methods=["POST"])
 def extract():
+    if "file" not in request.files:
+        return {"error": "No file uploaded"}, 400
 
-    if "image" not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
+    file = request.files["file"]
+    image_bytes = file.read()
 
-    file = request.files["image"]
+    ocr_results = run_ocr(image_bytes)
 
-    # Convert file to numpy array for OpenCV
-    file_bytes = np.frombuffer(file.read(), np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    data = extract_pmdc_data(ocr_results)
 
-    if image is None:
-        return jsonify({"error": "Invalid image file"}), 400
-
-    # OCR
-    ocr_results = reader.readtext(image)
-
-    # Extract fields
-    registration_number, name, fathername = extract_name_and_registration(ocr_results)
-
-    return jsonify({
-        "registration_number": registration_number,
-        "name": name,
-        "father_name": fathername
-    })
+    return data
 
 
 # =======================================
