@@ -10,6 +10,7 @@ const emailRoutes = require('./routes/emailRoutes');
 const questionnaireRoutes = require('./routes/questionnaireRoutes');
 const forumRoutes = require('./routes/forumRoutes');
 const doctorRoutes = require('./routes/doctorRoutes');
+const speechRoutes = require('./routes/speechRoutes')
 
 const app = express();
 const port = 3000;
@@ -38,11 +39,11 @@ app.use('/email', emailRoutes);
 app.use('/questionnaire', questionnaireRoutes);
 app.use('/forum', forumRoutes);
 app.use('/doctor', doctorRoutes);
+app.use('/speech', speechRoutes)
 
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // Start server
 app.listen(port, () => {
     console.log(`🚀 Server listening on port ${port}`);
-
 });

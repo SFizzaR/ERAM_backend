@@ -153,20 +153,14 @@ router.post("/verifyemail", expressAsyncHandler(async (req, res) => {
 // -------------------- GOOGLE LOGIN --------------------
 router.post('/google', expressAsyncHandler(async (req, res) => {
     const { email, googleId, name } = req.body;
-    if (!email || !googleId) {
-        return res.status(400).json({ message: "Email and googleId are required" });
-    }
-
     const hashEmail = hashForLookup(email);
 
     // Lookup profile in Supabase
-    let { data: users, error } = await supabase
+    let { data: user, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('email_hash', hashEmail)
-        .limit(1);
-
-    let user = users?.[0] || null;
+        .single();
 
     if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
         return res.status(500).json({ message: "Server error", error: error.message });
@@ -192,37 +186,41 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
         if (insertError) return res.status(500).json({ message: "Server error", error: insertError.message });
         user = newUser;
 
+        const { data: child, error: childInsertError } = await supabase
+            .from('children')
+            .insert({
+                name: child.name,
+                date_of_birth: child.date_of_birth,
+                user_id: user.id
+            });
+        if (childInsertError) {
+            console.error("Failed to insert child:", childInsertError);
+            return res.status(500).json({ message: "Failed to add child", error: childInsertError.message });
+        }
+
     } else if (!user.google_id) {
         // Link Google account
-        const { data: linkedUsers, error: updateError } = await supabase
+        const { data: linkedUser, error: updateError } = await supabase
             .from('profiles')
             .update({ google_id: googleId })
             .eq('email_hash', hashEmail)
-            .select('*')
-            .limit(1);
+            .select()
+            .single();
 
         if (updateError) return res.status(500).json({ message: "Server error", error: updateError.message });
-        user = linkedUsers?.[0] || user;
+        user = linkedUser;
     }
 
     // Generate backend JWT
     const token = jwt.sign(
-        { user: { id: user.id } },
+        { user: { id: user.supabase_uid } },
         process.env.JWT_SECRET,
         { expiresIn: '1h' }
     );
 
-    let safeEmail = user.email;
-    try {
-        safeEmail = decrypt(user.email);
-    } catch (e) {
-        // Keep legacy/plain email values if decryption fails.
-        safeEmail = user.email;
-    }
-
     res.status(201).json({
-        _id: user.id,
-        email: safeEmail,
+        _id: user.supabase_uid,
+        email: decrypt(user.email),
         username: user.username,
         token,
     });
@@ -345,7 +343,7 @@ router.put('/updateUser', protect, expressAsyncHandler(async (req, res) => {
 // Get current logged-in user
 router.get('/me', protect, expressAsyncHandler(async (req, res) => {
     try {
-        // Lookup user in Supabase by profile id from JWT
+        // Lookup user in Supabase by supabase_uid from JWT
         const { data: user, error } = await supabase
             .from('profiles')
             .select('*')
@@ -355,35 +353,41 @@ router.get('/me', protect, expressAsyncHandler(async (req, res) => {
         if (error || !user) {
             return res.status(404).json({ message: 'User not found' });
         }
-
-        const childrenResult = await supabase
-            .from('children')
-            .select('name, date_of_birth')
-            .eq('user_id', user.id);
-        if (childrenResult.error) {
-            console.error("Failed to fetch children:", childrenResult.error);
-            return res.status(500).json({ message: "Failed to fetch children", error: childrenResult.error.message });
-        }
-
-        let safeEmail = user.email;
-        try {
-            safeEmail = decrypt(user.email);
-        } catch (e) {
-            safeEmail = user.email;
-        }
-
         res.json({
             _id: user.id,
-            email: safeEmail,
+            email: decrypt(user.email),       // decrypt stored email
             username: user.username,
             current_city: user.current_city,
             preferred_language: user.preferred_language,
-            children: childrenResult.data,
         });
     } catch (err) {
         res.status(500).json({ message: "Server error", error: err.message });
     }
 }));
 
+router.get('/getChildren', protect, expressAsyncHandler(async (req, res) => {
+    try {
+        const { data: childrenResult, error } = await supabase
+            .from('children')
+            .select('id, name, date_of_birth, level')
+            .eq('user_id', req.user.id);
+
+        if (error) {
+            console.error("Failed to fetch children:", error);
+            return res.status(500).json({ message: "Failed to fetch children", error: error.message });
+        }
+
+        const children = childrenResult.map((child) => ({
+            id: child.id,
+            name: child.name,
+            level: child.level,
+            age: calculateAge(child.date_of_birth),
+        }));
+
+        res.json({ children });
+    } catch (err) {
+        res.status(500).json({ message: "Server error", error: err.message });
+    }
+}));
 
 module.exports = router;
