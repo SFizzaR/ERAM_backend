@@ -16,23 +16,40 @@ class DatabaseService:
     """Service for database operations using Supabase REST API"""
     
     def __init__(self):
-        """Initialize Supabase client"""
+        """Initialize service without opening the Supabase client immediately."""
+        self.supabase: Client | None = None
+        self._init_error: Exception | None = None
+
+    def _get_supabase(self) -> Client:
+        """Create the Supabase client on first use."""
+        if self.supabase is not None:
+            return self.supabase
+
+        if self._init_error is not None:
+            raise RuntimeError(f"Supabase client unavailable: {self._init_error}")
+
         try:
-            self.supabase: Client = create_client(
+            if not Config.SUPABASE_URL or not Config.SUPABASE_KEY:
+                raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+
+            self.supabase = create_client(
                 Config.SUPABASE_URL,
-                Config.SUPABASE_KEY
+                Config.SUPABASE_KEY,
             )
             logger.info("✓ Supabase REST API client initialized successfully")
+            return self.supabase
         except Exception as e:
+            self._init_error = e
             logger.error(f"✗ Error initializing Supabase client: {e}")
-            raise
+            raise RuntimeError(f"Supabase client unavailable: {e}") from e
     
     # ============ Child Operations ============
     
     def get_child(self, child_id):
         """Get child by ID"""
         try:
-            response = self.supabase.table('children').select('*').eq('id', child_id).execute()
+            supabase = self._get_supabase()
+            response = supabase.table('children').select('*').eq('id', child_id).execute()
             if response.data:
                 return response.data[0]
             logger.warning(f"⚠ Child not found: {child_id}")
@@ -44,7 +61,8 @@ class DatabaseService:
     def get_user_children(self, user_id):
         """Get all children for a user"""
         try:
-            response = self.supabase.table('children').select('*').eq('user_id', user_id).execute()
+            supabase = self._get_supabase()
+            response = supabase.table('children').select('*').eq('user_id', user_id).execute()
             return response.data if response.data else []
         except Exception as e:
             logger.error(f"✗ Error getting user children: {e}")
@@ -54,7 +72,8 @@ class DatabaseService:
         """Update child profile"""
         try:
             kwargs['updated_at'] = datetime.utcnow().isoformat()
-            response = self.supabase.table('children').update(kwargs).eq('id', child_id).execute()
+            supabase = self._get_supabase()
+            response = supabase.table('children').update(kwargs).eq('id', child_id).execute()
             logger.info(f"✓ Updated child: {child_id}")
             return response.data[0] if response.data else None
         except Exception as e:
@@ -67,7 +86,8 @@ class DatabaseService:
     def get_child_scores(self, child_id):
         """Get all scores/attempts for a child, sorted by timestamp"""
         try:
-            response = self.supabase.table('speech_attempts').select('*').eq('child_id', child_id).order('attempt_timestamp', desc=False).execute()
+            supabase = self._get_supabase()
+            response = supabase.table('speech_attempts').select('*').eq('child_id', child_id).order('attempt_timestamp', desc=False).execute()
             return response.data if response.data else []
         except Exception as e:
             logger.error(f"✗ Error getting child scores: {e}")
@@ -76,18 +96,52 @@ class DatabaseService:
     def get_child_latest_score(self, child_id):
         """Get the most recent score for a child"""
         try:
-            response = self.supabase.table('speech_attempts').select('*').eq('child_id', child_id).order('attempt_timestamp', desc=True).limit(1).execute()
+            supabase = self._get_supabase()
+            response = supabase.table('speech_attempts').select('*').eq('child_id', child_id).order('attempt_timestamp', desc=True).limit(1).execute()
             return response.data[0] if response.data else None
         except Exception as e:
             logger.error(f"✗ Error getting latest score: {e}")
             return None
+
+    def _ensure_assessment_session(self, child_id, session_id):
+        """Create assessment session row when a client-generated session_id is used."""
+        if not session_id:
+            return
+
+        supabase = self._get_supabase()
+
+        existing = supabase.table('assessment_sessions').select('id').eq('id', session_id).limit(1).execute()
+        if existing.data:
+            return
+
+        now_iso = datetime.utcnow().isoformat()
+        session_payloads = [
+            {'id': session_id, 'child_id': child_id},
+            {'id': session_id, 'child_id': child_id, 'created_at': now_iso},
+            {'id': session_id, 'child_id': child_id, 'started_at': now_iso},
+            {'id': session_id, 'child_id': child_id, 'start_time': now_iso},
+        ]
+
+        last_error = None
+        for payload in session_payloads:
+            try:
+                supabase.table('assessment_sessions').insert(payload).execute()
+                logger.info(f"✓ Created assessment session {session_id} for child {child_id}")
+                return
+            except Exception as e:
+                last_error = e
+
+        if last_error:
+            raise last_error
     
     def save_attempt(self, child_id, attempt_data):
         """Save speech attempt to database and update child stats"""
         try:
+            supabase = self._get_supabase()
+            session_id = attempt_data.get('session_id')
             attempt = {
                 'child_id': child_id,
-                'session_id': None,  # Optional: can be added later if sessions are used
+                'session_id': session_id,
                 'expected_word': attempt_data['expected_word'],
                 'recognized_text': attempt_data['recognized_text'],
                 'audio_file_path': attempt_data.get('audio_file_path'),
@@ -98,8 +152,23 @@ class DatabaseService:
                 'duration_seconds': attempt_data.get('audio', {}).get('duration_seconds'),
                 'attempt_timestamp': datetime.utcnow().isoformat()
             }
-            
-            response = self.supabase.table('speech_attempts').insert(attempt).execute()
+
+            try:
+                response = supabase.table('speech_attempts').insert(attempt).execute()
+            except Exception as e:
+                error_text = str(e)
+                is_session_fk_error = (
+                    session_id and
+                    ('speech_attempts_session_id_fkey' in error_text or 'Key (session_id)=' in error_text)
+                )
+
+                if not is_session_fk_error:
+                    raise
+
+                logger.warning(f"Session FK missing for {session_id}; creating session and retrying insert")
+                self._ensure_assessment_session(child_id, session_id)
+                response = supabase.table('speech_attempts').insert(attempt).execute()
+
             logger.info(f"✓ Saved attempt {response.data[0]['id']} for child {child_id}")
             
             # Update child summary stats
@@ -215,7 +284,8 @@ class DatabaseService:
                 metrics_list.append(metric)
             
             if metrics_list:
-                response = self.supabase.table('progress_metrics').insert(metrics_list).execute()
+                supabase = self._get_supabase()
+                response = supabase.table('progress_metrics').insert(metrics_list).execute()
                 logger.info(f"✓ Saved progress metrics for child {child_id}")
                 return response.data if response.data else None
             

@@ -182,7 +182,8 @@ def assess_pronunciation():
                     'audio_file_path': filepath,
                     'scores': assessment_result['scores'],
                     'speech_confidence': assessment_result['speech_confidence'],
-                    'audio': assessment_result['audio']
+                    'audio': assessment_result['audio'],
+                    'session_id': session_id,
                 }
                 
                 saved_attempt = db_service.save_attempt(child_id, attempt_data)
@@ -266,7 +267,8 @@ def batch_assess():
                         'audio_file_path': result['audio']['file_path'],
                         'scores': result['scores'],
                         'speech_confidence': result['speech_confidence'],
-                        'audio': result['audio']
+                        'audio': result['audio'],
+                        'session_id': session_id,
                     }
                     saved_attempt = db_service.save_attempt(child_id, attempt_data)
                     result['saved'] = True
