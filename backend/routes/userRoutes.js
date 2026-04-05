@@ -58,7 +58,8 @@ router.post('/register', expressAsyncHandler(async (req, res) => {
         .from('children').insert({
             name: child.name,
             date_of_birth: child.dateOfBirth,
-            user_id: updatedUser.id
+            user_id: updatedUser.id,
+            level: 1
         });
     if (childInsertError) {
         console.error("Failed to insert child:", childInsertError);
