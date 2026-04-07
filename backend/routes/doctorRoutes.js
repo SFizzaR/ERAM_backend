@@ -419,7 +419,7 @@ router.post('/login', expressAsyncHandler(async (req, res) => {
         }
 
 
-        hashEmail = hashForLookup(email)
+    const hashEmail = hashForLookup(email)
         // Find the user by email or username
         const { data: profile, error: profileError } = await supabase
             .from('doctors')
@@ -438,8 +438,8 @@ router.post('/login', expressAsyncHandler(async (req, res) => {
         if (profile && !profile.is_verified_email) {
             return res.status(400).json({ message: "Email not verified" });
         }
-        if (profile && profile.verification_status !== 'verified') {
-            return res.status(400).json({ message: "Doctor not verified" });
+        if (profile && profile.verification_status === 'rejected') {
+            return res.status(400).json({ message: "Doctor verification rejected" });
         }
         const { data: { user, session }, error: signInError } = await supabase.auth.signInWithPassword({
             email: decrypt(profile.email),
