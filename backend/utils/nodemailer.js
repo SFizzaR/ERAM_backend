@@ -32,11 +32,18 @@ async function sendMailWithSendGrid(email, subject, html, text) {
         subject,
       },
     ],
-    from: { email: from },
+    from: { email: from, name: "ERAM" },
+    replyTo: { email: "support@eram.app", name: "ERAM Support" },
     content: [
       { type: "text/plain", value: text },
       { type: "text/html", value: html },
     ],
+    headers: {
+      "X-Entity-ID": "eram-verification",
+      "X-Mailer": "ERAM-Backend",
+      "Precedence": "bulk",
+      "List-Unsubscribe": "<mailto:unsubscribe@eram.app>",
+    },
   };
 
   await axios.post("https://api.sendgrid.com/v3/mail/send", payload, {
@@ -251,7 +258,34 @@ Questions? <a href="mailto:support@eram.app" style="color:#5A31F4">support@eram.
 `;
 
     try {
-      await sendMailWithSendGrid(email, subject, html, text);
+      const consentPayload = {
+        personalizations: [
+          {
+            to: [{ email }],
+            subject,
+          },
+        ],
+        from: { email: from, name: "ERAM" },
+        replyTo: { email: "support@eram.app", name: "ERAM Support" },
+        content: [
+          { type: "text/plain", value: text },
+          { type: "text/html", value: html },
+        ],
+        headers: {
+          "X-Entity-ID": "eram-consent",
+          "X-Mailer": "ERAM-Backend",
+          "Precedence": "bulk",
+          "List-Unsubscribe": "<mailto:support@eram.app>",
+        },
+      };
+
+      await axios.post("https://api.sendgrid.com/v3/mail/send", consentPayload, {
+        headers: {
+          Authorization: `Bearer ${sendgridKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 12000,
+      });
       console.log("Consent email sent successfully via SendGrid API");
       return;
     } catch (error) {
