@@ -1,7 +1,16 @@
 // utils/nodemailer.js
 const nodemailer = require("nodemailer");
 
+function assertMailConfig() {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    const error = new Error("EMAIL_USER or EMAIL_PASS is missing in backend environment");
+    error.code = "EMAIL_CONFIG_MISSING";
+    throw error;
+  }
+}
+
 const sendMail = async (email, code) => {
+  assertMailConfig();
   // Use a proper transactional email service (RECOMMENDED: Resend, Mailgun, SES, etc.)
   // For now, we'll make Gmail as safe as possible
 
@@ -89,11 +98,13 @@ const sendMail = async (email, code) => {
     console.log("Verification email sent successfully");
   } catch (error) {
     console.error("Failed to send email:", error);
+    error.message = `Verification email failed: ${error.message}`;
     throw error;
   }
 };
 
 const consentMail = async (email) => {
+  assertMailConfig();
   const transporter = nodemailer.createTransport({
     service: "gmail",
     host: "smtp.gmail.com",
@@ -208,6 +219,7 @@ Questions? <a href="mailto:support@eram.app" style="color:#5A31F4">support@eram.
     console.log("Consent email sent successfully");
   } catch (error) {
     console.error("Failed to send consent email:", error);
+    error.message = `Consent email failed: ${error.message}`;
     throw error;
   }
 };
