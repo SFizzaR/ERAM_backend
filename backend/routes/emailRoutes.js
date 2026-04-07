@@ -1,5 +1,5 @@
 const express = require("express");
-const sendMail = require("../utils/nodemailer");
+const { sendMail } = require("../utils/nodemailer");
 const router = express.Router();
 const { hashForLookup, encrypt } = require("../utils/crypto");
 const supabase = require('../config/supabaseAdmin');
@@ -8,6 +8,8 @@ router.post("/send", async (req, res) => {
   try {
     const { email, role } = req.body;
     if (!email) return res.status(400).json({ message: "Email required" });
+
+    console.log(`[email/send] role=${role} email=${email}`);
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes from now
@@ -19,7 +21,7 @@ router.post("/send", async (req, res) => {
     else return res.status(400).json({ message: "Invalid role" });
 
     // Check if profile already exists in THIS role's table
-    const { data: profile, error: profileError } = await supabase
+    const { data: profileByEmail, error: profileError } = await supabase
       .from(tableName)
       .select("*")
       .eq("email_hash", hashEmail)
@@ -29,9 +31,9 @@ router.post("/send", async (req, res) => {
       return res.status(500).json({ message: "Failed to fetch profile", error: profileError.message });
     }
 
-    if (profile) {
+    if (profileByEmail) {
       // ✅ Already registered in this role
-      if (profile.google_id) {
+      if (profileByEmail.google_id) {
         return res.status(409).json({ message: "This email is registered via Google. Please sign in with Google." });
       }
 
@@ -100,13 +102,36 @@ router.post("/send", async (req, res) => {
             verification_status: 'pending'
           };
 
-      // Insert into THIS role's table with the shared auth ID
-      const { error: insertError } = await supabase
-        .from(tableName)
-        .insert({ ...baseInsert, ...roleDefaults });
+      const profilePayload = { ...baseInsert, ...roleDefaults };
 
-      if (insertError) {
-        return res.status(500).json({ message: "Failed to create profile", error: insertError.message });
+      // If we already have a row for this auth user id, update it instead of inserting.
+      const { data: profileById, error: profileByIdError } = await supabase
+        .from(tableName)
+        .select("id")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (profileByIdError) {
+        return res.status(500).json({ message: "Failed to check existing profile by id", error: profileByIdError.message });
+      }
+
+      if (profileById) {
+        const { error: updateExistingError } = await supabase
+          .from(tableName)
+          .update(profilePayload)
+          .eq("id", userId);
+
+        if (updateExistingError) {
+          return res.status(500).json({ message: "Failed to update existing profile", error: updateExistingError.message });
+        }
+      } else {
+        const { error: insertError } = await supabase
+          .from(tableName)
+          .insert(profilePayload);
+
+        if (insertError) {
+          return res.status(500).json({ message: "Failed to create profile", error: insertError.message });
+        }
       }
     }
 
@@ -115,7 +140,7 @@ router.post("/send", async (req, res) => {
 
   } catch (error) {
     console.error("Error sending email:", error);
-    res.status(500).json({ error: "Failed to send email" });
+    res.status(500).json({ error: "Failed to send email", details: error.message });
   }
 });
 
