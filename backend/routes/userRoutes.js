@@ -157,8 +157,29 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
         return res.status(400).json({ message: "Email and googleId are required" });
     }
 
-    const hashEmail = hashForLookup(email);
+    const normalizedEmail = email.trim().toLowerCase();
+    const hashEmail = hashForLookup(normalizedEmail);
     let isNewUser = false;
+
+    // Ensure there is an auth.users record first, then mirror profile with same id.
+    const { data: listedUsers, error: listUsersError } = await supabase.auth.admin.listUsers();
+    if (listUsersError) {
+        return res.status(500).json({ message: "Server error", error: listUsersError.message });
+    }
+
+    let authUser = listedUsers?.users?.find(u => (u.email || '').toLowerCase() === normalizedEmail);
+    if (!authUser) {
+        const { data: createdAuth, error: createAuthError } = await supabase.auth.admin.createUser({
+            email: normalizedEmail,
+            email_confirm: true,
+        });
+
+        if (createAuthError || !createdAuth?.user) {
+            return res.status(500).json({ message: "Server error", error: createAuthError?.message || "Failed to create auth user" });
+        }
+
+        authUser = createdAuth.user;
+    }
 
     // Lookup profile in Supabase
     let { data: user, error } = await supabase
@@ -176,7 +197,8 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
         const { data: newUser, error: insertError } = await supabase
             .from('profiles')
             .insert([{
-                email: encrypt(email),
+                id: authUser.id,
+                email: encrypt(normalizedEmail),
                 email_hash: hashEmail,
                 google_id: googleId,
                 username: name,
