@@ -15,25 +15,31 @@ function assertMailConfig() {
   }
 }
 
-async function sendMailWithResend(email, subject, html, text) {
-  const apiKey = readEnv("RESEND_API_KEY");
-  const from = readEnv("RESEND_FROM_EMAIL") || readEnv("EMAIL_USER");
+async function sendMailWithSendGrid(email, subject, html, text) {
+  const apiKey = readEnv("SENDGRID_API_KEY");
+  const from = readEnv("SENDGRID_FROM_EMAIL") || readEnv("EMAIL_USER");
 
   if (!apiKey || !from) {
-    const error = new Error("RESEND_API_KEY or sender email is missing");
-    error.code = "RESEND_CONFIG_MISSING";
+    const error = new Error("SENDGRID_API_KEY or sender email is missing");
+    error.code = "SENDGRID_CONFIG_MISSING";
     throw error;
   }
 
   const payload = {
-    from,
-    to: [email],
-    subject,
-    html,
-    text,
+    personalizations: [
+      {
+        to: [{ email }],
+        subject,
+      },
+    ],
+    from: { email: from },
+    content: [
+      { type: "text/plain", value: text },
+      { type: "text/html", value: html },
+    ],
   };
 
-  await axios.post("https://api.resend.com/emails", payload, {
+  await axios.post("https://api.sendgrid.com/v3/mail/send", payload, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -92,17 +98,17 @@ const sendMail = async (email, code) => {
       </html>
     `;
 
-  if (readEnv("RESEND_API_KEY")) {
+  if (readEnv("SENDGRID_API_KEY")) {
     try {
-      await sendMailWithResend(email, subject, html, text);
-      console.log("Verification email sent successfully via Resend API");
+      await sendMailWithSendGrid(email, subject, html, text);
+      console.log("Verification email sent successfully via SendGrid API");
       return;
     } catch (error) {
       const providerDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-      console.error("Resend send failed:", providerDetails);
-      const resendError = new Error(`Resend send failed: ${providerDetails}`);
-      resendError.code = "RESEND_SEND_FAILED";
-      throw resendError;
+      console.error("SendGrid send failed:", providerDetails);
+      const sendgridError = new Error(`SendGrid send failed: ${providerDetails}`);
+      sendgridError.code = "SENDGRID_SEND_FAILED";
+      throw sendgridError;
     }
   }
 
@@ -151,35 +157,106 @@ const sendMail = async (email, code) => {
 };
 
 const consentMail = async (email) => {
-  const resendKey = readEnv("RESEND_API_KEY");
-  if (resendKey) {
-    const from = readEnv("RESEND_FROM_EMAIL") || readEnv("EMAIL_USER");
+  const sendgridKey = readEnv("SENDGRID_API_KEY");
+  if (sendgridKey) {
+    const from = readEnv("SENDGRID_FROM_EMAIL") || readEnv("EMAIL_USER");
     if (!from) {
-      throw new Error("RESEND_FROM_EMAIL or EMAIL_USER is missing");
+      throw new Error("SENDGRID_FROM_EMAIL or EMAIL_USER is missing");
     }
 
     const subject = "ERAM Consent Form";
-    const text = "Please find attached the ERAM consent form.";
+    const text = "Please open ERAM app to continue doctor verification consent flow.";
+    const html = `
+     <!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ERAM Doctor Verification Consent</title>
+</head>
+
+<body style="margin:0;padding:0;background:#f6f9fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f6f9fc;padding:20px">
+<tr>
+<td align="center">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.1)">
+
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg,#5A31F4,#752ACA);padding:40px 30px;text-align:center">
+<h1 style="color:white;font-size:28px;margin:0">ERAM</h1>
+<p style="color:#e0d7ff;margin-top:8px">Doctor Verification</p>
+</td>
+</tr>
+
+<!-- Body -->
+<tr>
+<td style="padding:40px 30px;text-align:left">
+
+<h2 style="color:#1a1a1a;margin-bottom:16px;text-align:center">
+Consent for PMDC Verification
+</h2>
+
+<p style="color:#555;font-size:16px;line-height:1.7">
+To protect parents and children on ERAM, all medical professionals must be verified using the
+<strong>Pakistan Medical & Dental Council (PMDC)</strong> public registry.
+</p>
+
+<p style="color:#555;font-size:16px;line-height:1.7">
+By clicking <strong>Allow Verification</strong>, you authorize ERAM to use your submitted details
+(name, PMDC number, and related information) to check your medical registration from the
+PMDC public database solely for verification purposes.
+</p>
+
+<p style="color:#555;font-size:16px;line-height:1.7">
+If your PMDC record cannot be verified, your doctor account will not be activated.
+</p>
+
+<!-- CTA Button -->
+<div style="text-align:center;margin:35px 0">
+<a href="https://api.eram.app/doctor/consent?token={{CONSENT_TOKEN}}"
+   style="background:#5A31F4;color:white;text-decoration:none;
+          padding:16px 32px;border-radius:10px;
+          font-size:16px;font-weight:600;display:inline-block">
+Allow PMDC Verification
+</a>
+</div>
+
+<p style="color:#999;font-size:14px;text-align:center">
+If you did not request doctor verification on ERAM, please ignore this email.
+</p>
+
+</td>
+</tr>
+
+<!-- Footer -->
+<tr>
+<td style="background:#f9f9f9;padding:30px;text-align:center;color:#888;font-size:13px">
+<p style="margin:10px 0">
+© 2025 ERAM • Helping parents raise confident kids
+</p>
+<p style="margin:10px 0">
+Questions? <a href="mailto:support@eram.app" style="color:#5A31F4">support@eram.app</a>
+</p>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>
+`;
 
     try {
-      await axios.post("https://api.resend.com/emails", {
-        from,
-        to: [email],
-        subject,
-        html: `<p>Please open ERAM app to continue doctor verification consent flow.</p>`,
-        text,
-      }, {
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 12000,
-      });
-      console.log("Consent email sent successfully via Resend API");
+      await sendMailWithSendGrid(email, subject, html, text);
+      console.log("Consent email sent successfully via SendGrid API");
       return;
     } catch (error) {
       const providerDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-      throw new Error(`Resend consent send failed: ${providerDetails}`);
+      throw new Error(`SendGrid consent send failed: ${providerDetails}`);
     }
   }
 
