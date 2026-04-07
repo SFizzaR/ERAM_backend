@@ -75,17 +75,35 @@ router.post("/send", async (req, res) => {
         userId = authData.user.id;
       }
 
+      const baseInsert = {
+        id: userId,
+        email: encrypt(email),
+        email_hash: hashEmail,
+        email_verification_code: code,
+        email_verification_expires: expires,
+        is_verified_email: false
+      };
+
+      const roleDefaults = role === "guardian"
+        ? {
+            username: '',
+            current_city: '',
+            preferred_language: 'en'
+          }
+        : {
+            username: '',
+            current_city: '',
+            preferred_language: 'en',
+            full_name: '',
+            pmdc_number: '',
+            father_name: '',
+            verification_status: 'pending'
+          };
+
       // Insert into THIS role's table with the shared auth ID
       const { error: insertError } = await supabase
         .from(tableName)
-        .insert({
-          id: userId,
-          email: encrypt(email),
-          email_hash: hashEmail,
-          email_verification_code: code,
-          email_verification_expires: expires,
-          is_verified_email: false
-        });
+        .insert({ ...baseInsert, ...roleDefaults });
 
       if (insertError) {
         return res.status(500).json({ message: "Failed to create profile", error: insertError.message });

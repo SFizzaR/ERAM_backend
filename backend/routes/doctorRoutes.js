@@ -256,11 +256,18 @@ router.post('/register', expressAsyncHandler(async (req, res) => {
 
         if (updateError) return res.status(500).json({ error: updateError.message });
 
+        const accessToken = jwt.sign(
+            { user: { id: updatedUser.id } },
+            process.env.JWT_SECRET,
+            { expiresIn: "1h" }
+        );
+
 
         res.status(201).json({
             _id: updatedUser.id,
             email: decrypt(updatedUser.email),
             username: updatedUser.username,
+            accessToken,
         });
     }
     catch (err) {
