@@ -1,5 +1,6 @@
 // utils/nodemailer.js
 const nodemailer = require("nodemailer");
+const axios = require("axios");
 
 function assertMailConfig() {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
@@ -9,30 +10,38 @@ function assertMailConfig() {
   }
 }
 
-const sendMail = async (email, code) => {
-  assertMailConfig();
-  // Use a proper transactional email service (RECOMMENDED: Resend, Mailgun, SES, etc.)
-  // For now, we'll make Gmail as safe as possible
+async function sendMailWithResend(email, subject, html, text) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_USER;
 
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER,        // e.g. eram.tech.khi@gmail.com
-      pass: process.env.EMAIL_PASS,        // App Password (not regular password!)
+  if (!apiKey || !from) {
+    const error = new Error("RESEND_API_KEY or sender email is missing");
+    error.code = "RESEND_CONFIG_MISSING";
+    throw error;
+  }
+
+  const payload = {
+    from,
+    to: [email],
+    subject,
+    html,
+    text,
+  };
+
+  await axios.post("https://api.resend.com/emails", payload, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
     },
+    timeout: 12000,
   });
+}
 
-  const mailOptions = {
-    from: '"ERAM" <no-reply@eram.app>',           // This is what shows
-    sender: process.env.EMAIL_USER,               // Actual sending address
-    replyTo: "support@eram.app",                  // Where replies go
-    to: email,
-    subject: "Your ERAM Verification Code",
-    text: `Your verification code is ${code}\n\nThis code expires in 10 minutes.`, // Plain text fallback
-    html: `
+const sendMail = async (email, code) => {
+  const subject = "Your ERAM Verification Code";
+  const text = `Your verification code is ${code}\n\nThis code expires in 10 minutes.`;
+
+  const html = `
       <!DOCTYPE html>
       <html>
       <head>
@@ -45,13 +54,11 @@ const sendMail = async (email, code) => {
           <tr>
             <td align="center">
               <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.1)">
-                <!-- Header -->
                 <tr>
                   <td style="background:linear-gradient(135deg,#5A31F4,#752ACA);padding:40px 30px;text-align:center">
                     <h1 style="color:white;font-size:28px;margin:0">ERAM</h1>
                   </td>
                 </tr>
-                <!-- Body -->
                 <tr>
                   <td style="padding:40px 30px;text-align:center">
                     <h2 style="color:#1a1a1a;margin-bottom:20px">Your Verification Code</h2>
@@ -67,15 +74,9 @@ const sendMail = async (email, code) => {
                     </p>
                   </td>
                 </tr>
-                <!-- Footer -->
                 <tr>
                   <td style="background:#f9f9f9;padding:30px;text-align:center;color:#888;font-size:13px">
-                    <p style="margin:10px 0">
-                      © 2025 ERAM • Helping parents raise confident kids
-                    </p>
-                    <p style="margin:10px 0">
-                      Questions? Email <a href="mailto:eram.tech.khi@gmail.com" style="color:#5A31F4">support@eram.app</a>
-                    </p>
+                    <p style="margin:10px 0">© 2025 ERAM • Helping parents raise confident kids</p>
                   </td>
                 </tr>
               </table>
@@ -84,7 +85,44 @@ const sendMail = async (email, code) => {
         </table>
       </body>
       </html>
-    `,
+    `;
+
+  if (process.env.RESEND_API_KEY) {
+    try {
+      await sendMailWithResend(email, subject, html, text);
+      console.log("Verification email sent successfully via Resend API");
+      return;
+    } catch (error) {
+      console.error("Resend send failed, falling back to SMTP:", error.message);
+    }
+  }
+
+  assertMailConfig();
+  // Use a proper transactional email service (RECOMMENDED: Resend, Mailgun, SES, etc.)
+  // For now, we'll make Gmail as safe as possible
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 15000,
+    auth: {
+      user: process.env.EMAIL_USER,        // e.g. eram.tech.khi@gmail.com
+      pass: process.env.EMAIL_PASS,        // App Password (not regular password!)
+    },
+  });
+
+  const mailOptions = {
+    from: '"ERAM" <no-reply@eram.app>',           // This is what shows
+    sender: process.env.EMAIL_USER,               // Actual sending address
+    replyTo: "support@eram.app",                  // Where replies go
+    to: email,
+    subject,
+    text,
+    html,
     // These headers dramatically reduce spam score
     headers: {
       "X-Entity-ID": "eram-verification",
