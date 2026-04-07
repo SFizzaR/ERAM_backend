@@ -89,6 +89,7 @@ const sendMail = async (email, code) => {
     console.log("Verification email sent successfully");
   } catch (error) {
     console.error("Failed to send email:", error);
+    throw error;
   }
 };
 
@@ -207,7 +208,8 @@ Questions? <a href="mailto:support@eram.app" style="color:#5A31F4">support@eram.
     console.log("Consent email sent successfully");
   } catch (error) {
     console.error("Failed to send consent email:", error);
+    throw error;
   }
 };
 
-module.exports = sendMail, consentMail;
+module.exports = { sendMail, consentMail };
