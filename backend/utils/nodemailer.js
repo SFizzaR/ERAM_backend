@@ -2,8 +2,13 @@
 const nodemailer = require("nodemailer");
 const axios = require("axios");
 
+function readEnv(name) {
+  const value = process.env[name];
+  return typeof value === "string" ? value.trim() : value;
+}
+
 function assertMailConfig() {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+  if (!readEnv("EMAIL_USER") || !readEnv("EMAIL_PASS")) {
     const error = new Error("EMAIL_USER or EMAIL_PASS is missing in backend environment");
     error.code = "EMAIL_CONFIG_MISSING";
     throw error;
@@ -11,8 +16,8 @@ function assertMailConfig() {
 }
 
 async function sendMailWithResend(email, subject, html, text) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_USER;
+  const apiKey = readEnv("RESEND_API_KEY");
+  const from = readEnv("RESEND_FROM_EMAIL") || readEnv("EMAIL_USER");
 
   if (!apiKey || !from) {
     const error = new Error("RESEND_API_KEY or sender email is missing");
@@ -87,13 +92,17 @@ const sendMail = async (email, code) => {
       </html>
     `;
 
-  if (process.env.RESEND_API_KEY) {
+  if (readEnv("RESEND_API_KEY")) {
     try {
       await sendMailWithResend(email, subject, html, text);
       console.log("Verification email sent successfully via Resend API");
       return;
     } catch (error) {
-      console.error("Resend send failed, falling back to SMTP:", error.message);
+      const providerDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+      console.error("Resend send failed:", providerDetails);
+      const resendError = new Error(`Resend send failed: ${providerDetails}`);
+      resendError.code = "RESEND_SEND_FAILED";
+      throw resendError;
     }
   }
 
@@ -110,14 +119,14 @@ const sendMail = async (email, code) => {
     greetingTimeout: 12000,
     socketTimeout: 15000,
     auth: {
-      user: process.env.EMAIL_USER,        // e.g. eram.tech.khi@gmail.com
-      pass: process.env.EMAIL_PASS,        // App Password (not regular password!)
+      user: readEnv("EMAIL_USER"),        // e.g. eram.tech.khi@gmail.com
+      pass: readEnv("EMAIL_PASS"),        // App Password (not regular password!)
     },
   });
 
   const mailOptions = {
     from: '"ERAM" <no-reply@eram.app>',           // This is what shows
-    sender: process.env.EMAIL_USER,               // Actual sending address
+    sender: readEnv("EMAIL_USER"),               // Actual sending address
     replyTo: "support@eram.app",                  // Where replies go
     to: email,
     subject,
@@ -142,6 +151,38 @@ const sendMail = async (email, code) => {
 };
 
 const consentMail = async (email) => {
+  const resendKey = readEnv("RESEND_API_KEY");
+  if (resendKey) {
+    const from = readEnv("RESEND_FROM_EMAIL") || readEnv("EMAIL_USER");
+    if (!from) {
+      throw new Error("RESEND_FROM_EMAIL or EMAIL_USER is missing");
+    }
+
+    const subject = "ERAM Consent Form";
+    const text = "Please find attached the ERAM consent form.";
+
+    try {
+      await axios.post("https://api.resend.com/emails", {
+        from,
+        to: [email],
+        subject,
+        html: `<p>Please open ERAM app to continue doctor verification consent flow.</p>`,
+        text,
+      }, {
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 12000,
+      });
+      console.log("Consent email sent successfully via Resend API");
+      return;
+    } catch (error) {
+      const providerDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+      throw new Error(`Resend consent send failed: ${providerDetails}`);
+    }
+  }
+
   assertMailConfig();
   const transporter = nodemailer.createTransport({
     service: "gmail",
