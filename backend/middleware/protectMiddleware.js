@@ -21,26 +21,48 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ message: "Invalid token structure" });
     }
 
-    // Fetch user profile from Supabase
+    // Try guardian profile first.
     const { data: user, error } = await supabase
       .from('profiles')
       .select('*')
       .eq('id', id)
       .single();
 
-    if (error || !user) {
+    if (!error && user) {
+      req.user = {
+        id: user.id,
+        email: decrypt(user.email),
+        username: user.username,
+        current_city: user.current_city,
+        preferred_language: user.preferred_language,
+        children: user.children,
+        is_verified_email: user.is_verified_email,
+        role: 'guardian'
+      };
+
+      return next();
+    }
+
+    // Fallback to doctor profile so shared routes (forum, etc.) work for doctors too.
+    const { data: doctor, error: doctorError } = await supabase
+      .from('doctors')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (doctorError || !doctor) {
       return res.status(401).json({ message: "User not found" });
     }
 
-    // Attach user to request
     req.user = {
-      id: user.id,
-      email: decrypt(user.email),
-      username: user.username,
-      current_city: user.current_city,
-      preferred_language: user.preferred_language,
-      children: user.children,
-      is_verified_email: user.is_verified_email
+      id: doctor.id,
+      email: decrypt(doctor.email),
+      username: doctor.username,
+      current_city: doctor.current_city,
+      preferred_language: doctor.preferred_language,
+      children: [],
+      is_verified_email: doctor.is_verified_email,
+      role: 'doctor'
     };
 
     next();
