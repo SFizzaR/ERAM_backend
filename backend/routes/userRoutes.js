@@ -153,7 +153,12 @@ router.post("/verifyemail", expressAsyncHandler(async (req, res) => {
 // -------------------- GOOGLE LOGIN --------------------
 router.post('/google', expressAsyncHandler(async (req, res) => {
     const { email, googleId, name } = req.body;
+    if (!email || !googleId) {
+        return res.status(400).json({ message: "Email and googleId are required" });
+    }
+
     const hashEmail = hashForLookup(email);
+    let isNewUser = false;
 
     // Lookup profile in Supabase
     let { data: user, error } = await supabase
@@ -185,18 +190,7 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
 
         if (insertError) return res.status(500).json({ message: "Server error", error: insertError.message });
         user = newUser;
-
-        const { data: child, error: childInsertError } = await supabase
-            .from('children')
-            .insert({
-                name: child.name,
-                date_of_birth: child.date_of_birth,
-                user_id: user.id
-            });
-        if (childInsertError) {
-            console.error("Failed to insert child:", childInsertError);
-            return res.status(500).json({ message: "Failed to add child", error: childInsertError.message });
-        }
+        isNewUser = true;
 
     } else if (!user.google_id) {
         // Link Google account
@@ -213,16 +207,80 @@ router.post('/google', expressAsyncHandler(async (req, res) => {
 
     // Generate backend JWT
     const token = jwt.sign(
-        { user: { id: user.supabase_uid } },
+        { user: { id: user.id } },
         process.env.JWT_SECRET,
         { expiresIn: '1h' }
     );
 
     res.status(201).json({
-        _id: user.supabase_uid,
+        _id: user.id,
         email: decrypt(user.email),
         username: user.username,
         token,
+        isNewUser,
+    });
+}));
+
+router.post('/google/complete', protect, expressAsyncHandler(async (req, res) => {
+    const { username, city, language = 'en', child } = req.body;
+
+    if (req.user.role && req.user.role !== 'guardian') {
+        return res.status(403).json({ message: "Only guardian accounts can complete this profile flow" });
+    }
+
+    if (!username || !city || !child?.name || !child?.dateOfBirth) {
+        return res.status(400).json({ message: "username, city and child details are required" });
+    }
+
+    const age = calculateAge(child.dateOfBirth);
+    if (age === null) {
+        return res.status(400).json({ message: "Invalid date of birth" });
+    }
+
+    const { data: updatedUser, error: updateError } = await supabase
+        .from('profiles')
+        .update({
+            username,
+            current_city: city,
+            preferred_language: language,
+            is_verified_email: true,
+        })
+        .eq('id', req.user.id)
+        .select()
+        .single();
+
+    if (updateError || !updatedUser) {
+        return res.status(500).json({ message: "Failed to update profile", error: updateError?.message });
+    }
+
+    const { data: existingChildren, error: existingChildrenError } = await supabase
+        .from('children')
+        .select('id')
+        .eq('user_id', req.user.id)
+        .limit(1);
+
+    if (existingChildrenError) {
+        return res.status(500).json({ message: "Failed to check existing children", error: existingChildrenError.message });
+    }
+
+    if (!existingChildren || existingChildren.length === 0) {
+        const { error: childInsertError } = await supabase
+            .from('children')
+            .insert({
+                name: child.name,
+                date_of_birth: child.dateOfBirth,
+                user_id: req.user.id,
+            });
+
+        if (childInsertError) {
+            return res.status(500).json({ message: "Failed to add child", error: childInsertError.message });
+        }
+    }
+
+    res.status(200).json({
+        message: 'Google profile completed successfully',
+        _id: updatedUser.id,
+        username: updatedUser.username,
     });
 }));
 
