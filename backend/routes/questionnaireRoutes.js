@@ -105,7 +105,7 @@ router.post('/submitTest', expressAsyncHandler(async (req, res) => {
         features["Age"] = age;
 
         // 5. Send to ML model
-        const response = await axios.post('http://127.0.0.1:5000/predict', features);
+        const response = await axios.post('https://eram-ml-model-service.onrender.com/predict', features);
 
         return res.json(response.data);
 
