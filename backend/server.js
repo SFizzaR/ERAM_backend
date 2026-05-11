@@ -12,6 +12,7 @@ const forumRoutes = require('./routes/forumRoutes');
 const doctorRoutes = require('./routes/doctorRoutes');
 const speechRoutes = require('./routes/speechRoutes')
 const emoanimRoutes = require('./routes/emoanimRoutes');
+const followDotRoutes = require('./routes/followDotRoutes');
 
 const app = express();
 const port = 3000;
@@ -42,6 +43,7 @@ app.use('/forum', forumRoutes);
 app.use('/doctor', doctorRoutes);
 app.use('/speech', speechRoutes)
 app.use('/emoanim', emoanimRoutes);
+app.use('/followdot', followDotRoutes);
 
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
