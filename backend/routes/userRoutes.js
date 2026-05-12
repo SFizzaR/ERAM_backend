@@ -458,6 +458,7 @@ router.get('/getChildren', protect, expressAsyncHandler(async (req, res) => {
         }
 
         const children = childrenResult.map((child) => ({
+            _id: child.id,
             id: child.id,
             name: child.name,
             level: child.level,
