@@ -4,10 +4,10 @@ const router = express.Router();
 const supabase = require('../config/supabaseAdmin');
 
 // Middleware to get user/child from JWT
-const protectMiddleware = require('../middleware/protectMiddleware');
+const { protect } = require('../middleware/protectMiddleware');
 
 // Log a new trigger
-router.post('/logTrigger', protectMiddleware, expressAsyncHandler(async (req, res) => {
+router.post('/logTrigger', protect, expressAsyncHandler(async (req, res) => {
     const { childId, reason, duration, severity = 'moderate', notes } = req.body;
     const userId = req.user?.id;
 
@@ -85,7 +85,7 @@ router.post('/logTrigger', protectMiddleware, expressAsyncHandler(async (req, re
 }));
 
 // Get triggers for a specific child
-router.get('/getTriggers/:childId', protectMiddleware, expressAsyncHandler(async (req, res) => {
+router.get('/getTriggers/:childId', protect, expressAsyncHandler(async (req, res) => {
     const { childId } = req.params;
     const { limit = 100, offset = 0 } = req.query;
 
@@ -109,7 +109,7 @@ router.get('/getTriggers/:childId', protectMiddleware, expressAsyncHandler(async
 }));
 
 // Get trigger statistics for a child
-router.get('/getTriggerStats/:childId', protectMiddleware, expressAsyncHandler(async (req, res) => {
+router.get('/getTriggerStats/:childId', protect, expressAsyncHandler(async (req, res) => {
     const { childId } = req.params;
 
     try {
@@ -180,7 +180,7 @@ router.get('/getTriggerStats/:childId', protectMiddleware, expressAsyncHandler(a
 }));
 
 // Delete a trigger
-router.delete('/deleteTrigger/:triggerId', protectMiddleware, expressAsyncHandler(async (req, res) => {
+router.delete('/deleteTrigger/:triggerId', protect, expressAsyncHandler(async (req, res) => {
     const { triggerId } = req.params;
     const userId = req.user?.id;
 
