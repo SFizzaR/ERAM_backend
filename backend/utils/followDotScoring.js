@@ -138,10 +138,21 @@ function computeFromRoundEvents(roundEvents) {
 }
 
 function computeFromGazeSamples(gazeSamples) {
-  const samples = Array.isArray(gazeSamples) ? gazeSamples : [];
-  if (samples.length < 2) {
-    return null;
-  }
+  const raw = Array.isArray(gazeSamples) ? gazeSamples : [];
+  // Basic confidence filtering to reduce noisy measurements
+  const samples = raw
+    .filter((s) => s && (typeof s.timestampMs === 'number') && (typeof s.lookedAt === 'string'))
+    .map((s) => ({
+      timestampMs: Number(s.timestampMs),
+      lookedAt: String(s.lookedAt),
+      x: typeof s.x === 'number' ? s.x : null,
+      y: typeof s.y === 'number' ? s.y : null,
+      confidence: typeof s.confidence === 'number' ? s.confidence : 0,
+    }))
+    .filter((s) => s.confidence >= 0.35)
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+
+  if (samples.length < 2) return null;
 
   let socialMs = 0;
   let patternMs = 0;
@@ -151,25 +162,67 @@ function computeFromGazeSamples(gazeSamples) {
   const shiftLatencies = [];
   let previousLabel = null;
   let previousTimestamp = null;
+  let labelChanges = 0;
+
+  // Fixation detection (simple): consecutive identical labels are aggregated into fixations.
+  const fixationDurations = { face: [], pattern: [] };
+  let currentFixationLabel = null;
+  let currentFixationStart = null;
 
   for (const sample of samples) {
-    const ts = Number(sample.timestampMs || 0);
-    const label = String(sample.lookedAt || 'none');
+    const ts = sample.timestampMs;
+    const label = sample.lookedAt || 'none';
 
     if (previousTimestamp != null) {
-      const dt = clamp(ts - previousTimestamp, 0, 120);
+      const dt = clamp(ts - previousTimestamp, 0, 500);
       if (label !== 'none') lookedMs += dt;
       if (label === 'face' || label === 'eyes' || label === 'social') socialMs += dt;
       if (label === 'pattern') patternMs += dt;
       if (label === 'object' || label === 'nonsocial') objectMs += dt;
 
-      if (previousLabel && previousLabel !== label && label !== 'none') {
-        shiftLatencies.push(dt);
+      if (previousLabel && previousLabel !== label) {
+        // record shift latency when switching to a non-none label
+        if (label !== 'none') shiftLatencies.push(dt);
+        labelChanges += 1;
       }
+    }
+
+    // fixation aggregation
+    if (label !== 'none') {
+      if (currentFixationLabel === label) {
+        // continue fixation
+      } else {
+        // close previous fixation
+        if (currentFixationLabel && currentFixationStart != null) {
+          const dur = ts - currentFixationStart;
+          if (fixationDurations[currentFixationLabel]) {
+            fixationDurations[currentFixationLabel].push(dur);
+          }
+        }
+        // start new fixation
+        currentFixationLabel = label;
+        currentFixationStart = ts;
+      }
+    } else {
+      // none label ends current fixation
+      if (currentFixationLabel && currentFixationStart != null) {
+        const dur = ts - currentFixationStart;
+        if (fixationDurations[currentFixationLabel]) {
+          fixationDurations[currentFixationLabel].push(dur);
+        }
+      }
+      currentFixationLabel = null;
+      currentFixationStart = null;
     }
 
     previousLabel = label;
     previousTimestamp = ts;
+  }
+
+  // close any open fixation at end
+  if (currentFixationLabel && currentFixationStart != null && previousTimestamp != null) {
+    const dur = previousTimestamp - currentFixationStart;
+    if (fixationDurations[currentFixationLabel]) fixationDurations[currentFixationLabel].push(dur);
   }
 
   const nonSocialMs = patternMs + objectMs;
@@ -183,6 +236,13 @@ function computeFromGazeSamples(gazeSamples) {
     120,
     1200,
   );
+
+  const totalTimeSec = Math.max(0.001, (samples[samples.length - 1].timestampMs - samples[0].timestampMs) / 1000);
+  const saccadeFrequencyHz = labelChanges / totalTimeSec;
+
+  const meanFixation = (arr) => (arr && arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
+  const fixationFaceMs = meanFixation(fixationDurations.face);
+  const fixationPatternMs = meanFixation(fixationDurations.pattern);
 
   const trackingStabilityScore = clamp(55 + safeDiv(samples.length, 2), 0, 100);
 
@@ -212,6 +272,10 @@ function computeFromGazeSamples(gazeSamples) {
       trackingStabilityScore: round2(trackingStabilityScore),
       attentionFlexibilityScore: round2(attentionFlexibilityScore),
       stimulusPreferenceIndex: round2(toPct01(preferenceBalance01)),
+      // additional temporal metrics
+      fixationDurationFaceMs: round2(fixationFaceMs),
+      fixationDurationPatternMs: round2(fixationPatternMs),
+      saccadeFrequencyHz: round2(saccadeFrequencyHz),
     },
   };
 }
@@ -241,10 +305,152 @@ function buildAutismTraitIndex(metrics) {
   };
 }
 
+function computeEngagementScore(gazeSamples) {
+  const raw = Array.isArray(gazeSamples) ? gazeSamples : [];
+  const samples = raw
+    .filter((s) => s && (typeof s.timestampMs === 'number') && (typeof s.lookedAt === 'string'))
+    .map((s) => ({
+      timestampMs: Number(s.timestampMs),
+      lookedAt: String(s.lookedAt),
+      x: typeof s.x === 'number' ? s.x : null,
+      y: typeof s.y === 'number' ? s.y : null,
+      confidence: typeof s.confidence === 'number' ? s.confidence : 0,
+    }))
+    .filter((s) => s.confidence >= 0.35)
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+
+  if (samples.length < 2) {
+    return {
+      engagementScore: 0,
+      engagementBand: 'Very Low',
+      metrics: {
+        patternRatio: 0,
+        faceRatio: 0,
+        stability: 0,
+        scatterIndex: 0,
+        confidenceConsistency: 0,
+      },
+    };
+  }
+
+  // Step A: Count time on each target
+  let patternTime = 0;
+  let faceTime = 0;
+  let noneTime = 0;
+  let totalTime = 0;
+  let previousTimestamp = null;
+
+  // Step B: Compute target switches and stability
+  let targetSwitches = 0;
+  let previousLabel = null;
+
+  // Step C: Collect gaze positions for scatter computation
+  const gazePositions = [];
+
+  for (const sample of samples) {
+    const ts = sample.timestampMs;
+    const label = sample.lookedAt || 'none';
+
+    // Accumulate time on each target
+    if (previousTimestamp != null) {
+      const dt = clamp(ts - previousTimestamp, 0, 500);
+      totalTime += dt;
+
+      if (label === 'face') {
+        faceTime += dt;
+      } else if (label === 'pattern') {
+        patternTime += dt;
+      } else {
+        noneTime += dt;
+      }
+    }
+
+    // Count target switches
+    if (previousLabel && previousLabel !== label && label !== 'none' && previousLabel !== 'none') {
+      targetSwitches += 1;
+    }
+
+    // Collect gaze positions for scatter computation
+    if (sample.x != null && sample.y != null) {
+      gazePositions.push({ x: sample.x, y: sample.y });
+    }
+
+    previousLabel = label;
+    previousTimestamp = ts;
+  }
+
+  const validTime = faceTime + patternTime;
+
+  // Step B: Compute ratios
+  const patternRatio = safeDiv(patternTime, validTime || 1);
+  const faceRatio = safeDiv(faceTime, validTime || 1);
+
+  // Step C: Compute stability (1 - switches/samples)
+  const stability = clamp(1 - safeDiv(targetSwitches, samples.length || 1), 0, 1);
+
+  // Step D: Compute scatter index (variance of gaze movement)
+  let scatterIndex = 0;
+  if (gazePositions.length > 1) {
+    const meanX = gazePositions.reduce((s, p) => s + p.x, 0) / gazePositions.length;
+    const meanY = gazePositions.reduce((s, p) => s + p.y, 0) / gazePositions.length;
+    const varX = gazePositions.reduce((s, p) => s + Math.pow(p.x - meanX, 2), 0) / gazePositions.length;
+    const varY = gazePositions.reduce((s, p) => s + Math.pow(p.y - meanY, 2), 0) / gazePositions.length;
+    const scatterVariance = varX + varY;
+    // Normalize scatter to [0, 1]: high scatter = 1, low scatter = 0
+    scatterIndex = clamp(scatterVariance / 100000, 0, 1);
+  }
+
+  // Step E: Compute confidence-weighted consistency (average confidence)
+  const avgConfidence = safeDiv(
+    samples.reduce((s, sample) => s + sample.confidence, 0),
+    samples.length || 1,
+  );
+
+  // Step F: Final Engagement Score formula
+  // E = 0.4P + 0.25F + 0.2S + 0.15C
+  // where:
+  // P = pattern attention ratio
+  // F = face attention ratio
+  // S = stability score
+  // C = confidence-weighted consistency
+  const engagementScore01 =
+    0.4 * patternRatio +
+    0.25 * faceRatio +
+    0.2 * stability +
+    0.15 * avgConfidence;
+
+  const engagementScore = round2(clamp(engagementScore01 * 100, 0, 100));
+
+  // Step G: Determine engagement band
+  let engagementBand = 'Very Low';
+  if (engagementScore >= 80) {
+    engagementBand = 'Highly Engaged';
+  } else if (engagementScore >= 60) {
+    engagementBand = 'Moderate Engagement';
+  } else if (engagementScore >= 40) {
+    engagementBand = 'Low Engagement';
+  }
+
+  return {
+    engagementScore,
+    engagementBand,
+    metrics: {
+      patternRatio: round2(patternRatio),
+      faceRatio: round2(faceRatio),
+      stability: round2(stability),
+      scatterIndex: round2(scatterIndex),
+      confidenceConsistency: round2(avgConfidence),
+      targetSwitches,
+      totalSamples: samples.length,
+    },
+  };
+}
+
 function scoreFollowDotSession({ roundEvents, gazeSamples }) {
   const gazeScoring = computeFromGazeSamples(gazeSamples);
   const base = gazeScoring || computeFromRoundEvents(roundEvents);
   const ati = buildAutismTraitIndex(base.metrics);
+  const engagement = computeEngagementScore(gazeSamples);
 
   return {
     measurementMode: base.mode,
@@ -258,6 +464,8 @@ function scoreFollowDotSession({ roundEvents, gazeSamples }) {
       eyeAvoidanceScore: base.metrics.eyeAvoidanceScore,
       stimulusPreferenceIndex: base.metrics.stimulusPreferenceIndex,
       autismTraitIndex: ati.autismTraitIndex,
+      engagementScore: engagement.engagementScore,
+      engagementBand: engagement.engagementBand,
     },
     ratios: {
       socialAttentionRatio: base.metrics.socialAttentionRatio,
@@ -268,9 +476,12 @@ function scoreFollowDotSession({ roundEvents, gazeSamples }) {
       averageFirstFixationLatencyMs: base.metrics.averageFirstFixationLatencyMs,
       averageAttentionShiftLatencyMs: base.metrics.averageAttentionShiftLatencyMs,
     },
+    engagement: engagement.metrics,
     interpretation: ati.interpretation,
+    engagementInterpretation: engagement.engagementBand,
     formula: {
       autismTraitIndex: '0.35*(SocialDeficit) + 0.25*(PatternPreference) + 0.20*(EyeAvoidance) + 0.20*(AttentionRigidity)',
+      engagementScore: 'E = 0.4*PatternRatio + 0.25*FaceRatio + 0.2*Stability + 0.15*ConfidenceConsistency',
       note: 'All components are normalized to 0-100.',
     },
     disclaimer: 'Screening support only. This is not a medical diagnosis.',
