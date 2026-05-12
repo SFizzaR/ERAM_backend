@@ -22,6 +22,9 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import threading
+import time
+from collections import deque
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +42,56 @@ app.add_middleware(
 
 # ── MediaPipe setup ───────────────────────────────────────────────────────────
 mp_face_mesh = mp.solutions.face_mesh
+
+# Create a single FaceMesh instance at startup and reuse it for all requests.
+# This avoids re-initializing MediaPipe for every frame which is extremely expensive.
+face_mesh_instance = None
+face_mesh_lock = threading.Lock()
+
+
+@app.on_event("startup")
+def startup_event():
+    global face_mesh_instance
+    try:
+        # Use dynamic (non-static) mode for continuous frames for better tracking
+        face_mesh_instance = mp_face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.45,
+            min_tracking_confidence=0.45,
+        )
+        logger.info("Initialized global MediaPipe FaceMesh instance")
+    except Exception as e:
+        logger.exception("Failed to initialize FaceMesh: %s", e)
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    global face_mesh_instance
+    try:
+        if face_mesh_instance is not None:
+            face_mesh_instance.close()
+            face_mesh_instance = None
+            logger.info("Closed global FaceMesh instance")
+    except Exception:
+        pass
+
+# ── Per-session smoothing / state ───────────────────────────────────────────
+# Stores small history and previous smoothed gaze per sessionId so multiple
+# concurrent sessions don't mix their temporal smoothing state.
+MIN_INTERVAL_SEC = 0.25  # minimum seconds between processed frames per session (rate limit)
+session_states = {}
+# Configuration
+SMOOTHING_ALPHA = 0.7  # weight for previous value in exponential smoothing
+GAZE_HISTORY_LEN = 8
+SESSION_PRUNE_SECONDS = 60.0
+
+def prune_session_states():
+    now = time.time()
+    to_delete = [k for k, v in session_states.items() if now - v.get("last_seen", 0) > SESSION_PRUNE_SECONDS]
+    for k in to_delete:
+        del session_states[k]
 
 # Iris landmark indices (MediaPipe Face Mesh with refine_landmarks=True)
 LEFT_IRIS  = [474, 475, 476, 477]
@@ -68,6 +121,7 @@ class FrameRequest(BaseModel):
     screenWidth: float
     screenHeight: float
     bubblePositions: Optional[List[BubblePosition]] = None
+    sessionId: Optional[str] = None
 
 
 class FrameResponse(BaseModel):
@@ -211,16 +265,30 @@ async def analyze_frame(req: FrameRequest):
     img_h, img_w = img.shape[:2]
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.45,
-        min_tracking_confidence=0.45,
-    ) as face_mesh:
-        results = face_mesh.process(img_rgb)
+    # Use the global face_mesh_instance when available to avoid per-request init.
+    results = None
+    try:
+        if face_mesh_instance is not None:
+            # protect process calls with a lock for thread-safety
+            with face_mesh_lock:
+                results = face_mesh_instance.process(img_rgb)
+        else:
+            # Fallback to a short-lived local instance if startup initialization failed
+            with mp_face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.45,
+                min_tracking_confidence=0.45,
+            ) as local_mesh:
+                results = local_mesh.process(img_rgb)
+    except Exception as e:
+        logger.exception("FaceMesh processing error: %s", e)
+        raise HTTPException(status_code=500, detail="CV processing error")
 
-    if not results.multi_face_landmarks:
+    if not results or not results.multi_face_landmarks:
+        # No face detected; still return structure so frontend can continue
+        logger.debug("No face landmarks found; bubblePositions present=%s", bool(req.bubblePositions))
         return FrameResponse(faceDetected=False, confidence=0.0)
 
     landmarks = results.multi_face_landmarks[0].landmark
@@ -229,9 +297,9 @@ async def analyze_frame(req: FrameRequest):
     face_cx = landmarks[1].x * img_w
     face_cy = landmarks[1].y * img_h
 
-    gaze_x_norm, gaze_y_norm = estimate_gaze_normalised(landmarks, img_w, img_h)
+    gaze_x_norm_raw, gaze_y_norm_raw = estimate_gaze_normalised(landmarks, img_w, img_h)
 
-    if gaze_x_norm is None:
+    if gaze_x_norm_raw is None:
         return FrameResponse(
             faceDetected=True,
             gazeDirection="unknown",
@@ -239,19 +307,88 @@ async def analyze_frame(req: FrameRequest):
             confidence=0.40,
         )
 
+    # Per-session smoothing
+    prune_session_states()
+    sid = req.sessionId or "_global"
+    sess = session_states.setdefault(sid, {
+        "prev_gx": gaze_x_norm_raw,
+        "prev_gy": gaze_y_norm_raw,
+        "gaze_history": deque(maxlen=GAZE_HISTORY_LEN),
+        "last_seen": time.time(),
+    })
+
+    prev_gx = sess.get("prev_gx", gaze_x_norm_raw)
+    prev_gy = sess.get("prev_gy", gaze_y_norm_raw)
+
+    gx = prev_gx * SMOOTHING_ALPHA + gaze_x_norm_raw * (1.0 - SMOOTHING_ALPHA)
+    gy = prev_gy * SMOOTHING_ALPHA + gaze_y_norm_raw * (1.0 - SMOOTHING_ALPHA)
+
+    sess["prev_gx"] = gx
+    sess["prev_gy"] = gy
+    sess["last_seen"] = time.time()
+
+    # Basic blink detection using iris vertical span relative to eye height
+    try:
+        def pt(i):
+            return np.array([landmarks[i].x * img_w, landmarks[i].y * img_h], dtype=np.float32)
+
+        l_iris = np.stack([pt(i) for i in LEFT_IRIS])
+        r_iris = np.stack([pt(i) for i in RIGHT_IRIS])
+        l_span = float(l_iris[:, 1].max() - l_iris[:, 1].min())
+        r_span = float(r_iris[:, 1].max() - r_iris[:, 1].min())
+
+        l_eye_h = abs(landmarks[L_CORNER_OUTER].y - landmarks[L_CORNER_INNER].y) * img_h
+        r_eye_h = abs(landmarks[R_CORNER_OUTER].y - landmarks[R_CORNER_INNER].y) * img_h
+        eye_open_ratio = ( (l_span + r_span) / 2.0 ) / max(1.0, ( (l_eye_h + r_eye_h) / 2.0 ))
+        blink = eye_open_ratio < 0.12
+    except Exception:
+        blink = False
+
+    # Compute a dynamic confidence score from several heuristics
+    # face size (fraction of image), centrality, recent gaze stability, and head rotation
+    try:
+        ys = np.array([lm.y for lm in landmarks])
+        face_h_frac = float((ys.max() - ys.min()))
+    except Exception:
+        face_h_frac = 0.25
+
+    centrality = 1.0 - abs((face_cx / img_w) - 0.5) * 2.0
+    # estimate rough head rotation influence
+    yaw = round((landmarks[1].x - 0.5) * 90, 1)
+    pitch = round((landmarks[1].y - 0.5) * 60, 1)
+    head_rot_mag = min(1.0, (abs(yaw) + abs(pitch)) / 120.0)
+
+    # gaze stability (variance) over recent history
+    gh = list(sess.get("gaze_history", []))
+    if gh:
+        arr = np.array([[g[1], g[2]] for g in gh])
+        var = float(np.mean(np.var(arr, axis=0)))
+    else:
+        var = 0.0
+    var_norm = min(1.0, var / 0.02)
+
+    confidence = max(0.0, min(1.0, 0.35 * centrality + 0.30 * min(1.0, face_h_frac * 2.0) + 0.25 * (1.0 - var_norm) + 0.10 * (1.0 - head_rot_mag)))
+
+    if blink:
+        # reject frames where eyes are closed — very low confidence
+        confidence = 0.0
+
+    # map smoothed gaze to screen coordinates
     sx, sy = gaze_to_screen(
-        gaze_x_norm, gaze_y_norm,
+        gx, gy,
         face_cx, face_cy,
         img_w, img_h,
         req.screenWidth, req.screenHeight,
     )
 
-    direction = classify_direction(gaze_x_norm, gaze_y_norm)
-    target = nearest_bubble_target(sx, sy, req.bubblePositions or [])
+    direction = classify_direction(gx, gy)
+    bubbles = req.bubblePositions or []
+    if not bubbles:
+        logger.debug("analyze-frame: no bubblePositions sent from frontend; mapping may be inaccurate")
+    target = nearest_bubble_target(sx, sy, bubbles)
 
-    # Rough head pose (degrees) from nose-tip offset
-    yaw   = round((landmarks[1].x - 0.5) * 90, 1)
-    pitch = round((landmarks[1].y - 0.5) * 60, 1)
+    # append to session gaze history for stability measures
+    sess["gaze_history"].append((time.time(), gx, gy, confidence))
 
     return FrameResponse(
         faceDetected=True,
@@ -259,7 +396,7 @@ async def analyze_frame(req: FrameRequest):
         gazeY=round(sy, 1),
         gazeDirection=direction,
         attentionTarget=target,
-        confidence=0.78,
+        confidence=round(float(confidence), 2),
         headPoseYaw=yaw,
         headPosePitch=pitch,
     )
