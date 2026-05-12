@@ -4,6 +4,7 @@ const expressAsyncHandler = require('express-async-handler');
 const supabase = require('../config/supabaseAdmin');
 const { protect } = require('../middleware/protectMiddleware');
 const { scoreFollowDotSession } = require('../utils/followDotScoring');
+const { saveFollowDotSession } = require('../utils/followDotPersistence');
 
 const router = express.Router();
 
@@ -47,7 +48,7 @@ router.post('/score', protect, expressAsyncHandler(async (req, res) => {
     warnings.push('Low sample size. Consider running more rounds for a more stable estimate.');
   }
 
-  return res.status(200).json({
+  const responseBody = {
     childId: childId || null,
     childAge: childAge ?? null,
     measurementMode: scoring.measurementMode,
@@ -65,7 +66,34 @@ router.post('/score', protect, expressAsyncHandler(async (req, res) => {
       appVersion: metadata?.appVersion || null,
     },
     clinicalDisclaimer: scoring.disclaimer,
-  });
+  };
+
+  try {
+    await saveFollowDotSession({
+      userId: req.user?.id,
+      childId: childId || null,
+      assessmentMode: metadata?.assessmentMode || null,
+      measurementMode: scoring.measurementMode,
+      roundEvents,
+      gazeSamples,
+      scores: scoring.scores,
+      ratios: scoring.ratios,
+      timing: scoring.timing,
+      totals: scoring.totals,
+      interpretation: scoring.interpretation,
+      warnings,
+      metadata: {
+        ...metadata,
+        submittedAt: new Date().toISOString(),
+        source: metadata?.source || 'follow-the-dot',
+      },
+      sourceRoute: '/followdot/score',
+    });
+  } catch (saveError) {
+    console.error('Failed to save Follow-the-Dot session:', saveError);
+  }
+
+  return res.status(200).json(responseBody);
 }));
 
 module.exports = router;
