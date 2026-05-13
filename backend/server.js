@@ -15,7 +15,7 @@ const emoanimRoutes = require('./routes/emoanimRoutes');
 const followDotRoutes = require('./routes/followDotRoutes');
 const bubbleGameRoutes = require('./routes/bubbleGameRoutes');
 const triggerRoutes = require('./routes/triggerRoutes');
-
+const translate = require('./routes/translator');
 const app = express();
 const port = 3000;
 
@@ -48,6 +48,7 @@ app.use('/emoanim', emoanimRoutes);
 app.use('/followdot', followDotRoutes);
 app.use('/bubble-game', bubbleGameRoutes);
 app.use('/triggers', triggerRoutes);
+app.use('/translate', translate);
 
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
