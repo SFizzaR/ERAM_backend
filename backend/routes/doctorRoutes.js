@@ -136,19 +136,6 @@ router.post("/verifypmdc", expressAsyncHandler(async (req, res) => {
 
             return res.json({ verified: false, message: "Name does not match" });
         }
-        //case 4 
-          const isDental = result.qualifications?.some(q =>
-            q.degree.toUpperCase().includes('BDS') ||
-            q.degree.toUpperCase().includes('DENTAL')
-        );
-
-        if (isDental) {
-            return res.status(400).json({
-                verified: false,
-                error: "Dental qualifications are not accepted"
-            });
-        }
-
 
         // Optional: Father's name check
         if (fatherName && result.fatherName?.toUpperCase() !== fatherName.toUpperCase()) {

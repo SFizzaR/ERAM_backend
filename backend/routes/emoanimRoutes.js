@@ -9,6 +9,7 @@ const {
   calculateAgeBand,
   MIN_ATTEMPTS_FOR_STABLE_SIGNAL,
 } = require('../utils/emoanimRisk');
+const { calculateAndUpdateAutismLevel } = require('../utils/calculateAutismLevel');
 
 const router = express.Router();
 
@@ -276,6 +277,10 @@ router.post('/session/end', protect, expressAsyncHandler(async (req, res) => {
   const warning = features.totalAttempts < MIN_ATTEMPTS_FOR_STABLE_SIGNAL
     ? `Low number of attempts (${features.totalAttempts}). Risk signal may be unstable.`
     : null;
+
+  // Calculate and update child's autism level based on combined bubble + emoanim scores
+  const levelCalcResult = await calculateAndUpdateAutismLevel(session.child_id, req.user.id);
+  console.log('[emoanimRoutes] Autism level calculation result:', levelCalcResult);
 
   return res.status(200).json({
     sessionId: session.id,

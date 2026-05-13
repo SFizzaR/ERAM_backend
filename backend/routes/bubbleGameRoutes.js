@@ -21,6 +21,8 @@ const { protect } = require('../middleware/protectMiddleware');
 const { scoreFollowDotSession } = require('../utils/followDotScoring');
 const { saveFollowDotSession } = require('../utils/followDotPersistence');
 
+const { calculateAndUpdateAutismLevel } = require('../utils/calculateAutismLevel');
+
 const router = express.Router();
 
 // Python CV service base URL — override with CV_SERVICE_URL env var when deployed
@@ -159,7 +161,55 @@ router.post(
       console.error('Failed to save bubble-game session:', saveError);
     }
 
+    // Calculate and update child's autism level (if user is available)
+    if (childId && req.user?.id) {
+      try {
+        const levelResult = await calculateAndUpdateAutismLevel(childId, req.user.id);
+        console.log('[bubbleGameRoutes] Level calculation result:', levelResult);
+        // Add the result to response but don't let errors interrupt the score response
+        responseBody.levelCalculation = levelResult;
+      } catch (levelError) {
+        console.error('[bubbleGameRoutes] Error calculating autism level:', levelError);
+        // Don't let level calculation errors break the main response
+      }
+    }
+
     return res.status(200).json(responseBody);
+  }),
+);
+
+// ── POST /bubble-game/calculate-level ────────────────────────────────────────
+// Endpoint to manually recalculate and update a child's autism level
+router.post(
+  '/calculate-level',
+  protect,
+  expressAsyncHandler(async (req, res) => {
+    const { childId } = req.body;
+
+    if (!childId) {
+      return res.status(400).json({ message: 'childId is required' });
+    }
+
+    try {
+      const result = await calculateAndUpdateAutismLevel(childId, req.user.id);
+
+      if (result.success) {
+        return res.status(200).json({
+          message: 'Autism level calculated and updated successfully',
+          ...result,
+        });
+      } else {
+        return res.status(400).json({
+          message: result.error || 'Failed to calculate autism level',
+          ...result,
+        });
+      }
+    } catch (error) {
+      return res.status(500).json({
+        message: 'Error calculating autism level',
+        error: error.message,
+      });
+    }
   }),
 );
 
