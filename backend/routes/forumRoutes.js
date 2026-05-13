@@ -51,17 +51,14 @@ async function enrichPosts(posts, userId) {
     .select('id, username, current_city')
     .in('id', uniqueUserIds);
 
-  const { data: doctors } = await supabase
-    .from('doctors')
-    .select('id, username, current_city')
-    .in('id', uniqueUserIds);
+  const profileMap = new Map(profiles.map(p => [p.id, p]));
 
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-  (doctors || []).forEach(d => {
-    if (!profileMap.has(d.id)) {
-      profileMap.set(d.id, d);
-    }
-  });
+  // Fallback to MongoDB if profile missing (rare)
+  const missingUids = uniqueUserIds.filter(uid => !profileMap.has(uid));
+  if (missingUids.length) {
+    const mongoUsers = await User.find({ supabase_uid: { $in: missingUids } });
+    mongoUsers.forEach(u => profileMap.set(u.supabase_uid, { username: u.username, current_city: u.current_city }));
+  }
 
   return await Promise.all(
     posts.map(async (post) => {
