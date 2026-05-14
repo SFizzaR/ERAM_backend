@@ -32,7 +32,13 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     || incomingTagsArray.includes('askDoctor');
 
   // Remove the special 'askDoctor' tag from the category string to satisfy DB constraint
-  const tags = incomingTagsArray.filter(t => t !== 'askDoctor').join(',');
+  const tags = incomingTagsArray
+    .map(t => String(t).trim())
+    .filter(t => t && t !== 'askDoctor')
+    .join(',');
+
+  // If no valid category remains, use null instead of empty string to satisfy strict DB checks
+  const categoryToInsert = tags.length ? tags : null;
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -46,7 +52,7 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
 
   const { data, error } = await supabase
     .from('posts')
-    .insert({ user_id: userId, title, content, category: tags, media_urls, is_anonymous, post_type, ask_doctor: askDoctor })
+    .insert({ user_id: userId, title, content, category: categoryToInsert, media_urls, is_anonymous, post_type, ask_doctor: askDoctor })
     .select()
     .single();
 
