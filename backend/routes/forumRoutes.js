@@ -31,18 +31,14 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     || req.body.askDoctor === true
     || incomingTagsArray.includes('askDoctor');
 
-  // Normalize tags (keep special 'askDoctor' tag so it can be shown client-side)
+  // Normalize tags (keep special 'askDoctor' in the tags array so it can be shown)
   const tagsArray = incomingTagsArray
     .map(t => String(t).trim())
-    .filter(Boolean);
+    .filter(t => t);
 
-  // Keep legacy `category` column compatible with the existing DB constraint.
-  // The multi-tag data lives in `tags`; `category` is only for backward compatibility.
-  const categoryCandidates = [
-    tagsArray[0] || null,
-    null,
-    'generalQuestions',
-  ];
+  // Choose a safe legacy `category` value: prefer the first non-'askDoctor' tag
+  const firstNonAsk = tagsArray.find(t => t !== 'askDoctor');
+  const categoryCandidates = [firstNonAsk || null, null, 'generalQuestions'];
 
   const buildPostPayload = (categoryValue) => ({
     user_id: userId,
@@ -920,14 +916,13 @@ router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) 
     const { data: comments, error } = await supabase
       .from('comments')
       .select(`
-          id,
-          content,
-          created_at,
-          user_id,
-          parent_id,
-          post_id,
-          is_anonymous
-        `)
+        id,
+        content,
+        created_at,
+        user_id,
+        parent_id,
+        post_id
+      `)
       .eq('post_id', postId)
       .order('created_at', { ascending: true });
 
@@ -983,7 +978,7 @@ router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) 
       const enriched = {
         id: comment.id,
         content: comment.content,
-        author: comment.is_anonymous ? 'Anonymous' : (profileMap[comment.user_id] || 'Unknown'),
+        author: profileMap[comment.user_id] || 'Anonymous',
         timestamp: comment.created_at,
         // Return authoritative like counts and whether current user liked
         total_likes: likesCountMap[comment.id] || 0,
