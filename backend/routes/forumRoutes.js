@@ -63,6 +63,22 @@ async function enrichPosts(posts, userId) {
 
   const profileMap = new Map((profiles || []).map(p => [p.id, p]));
 
+  // If some user profiles are missing, try fetching doctor records for those IDs
+  const missingUids = uniqueUserIds.filter(uid => !profileMap.has(uid));
+  if (missingUids.length) {
+    try {
+      const { data: doctors } = await supabase
+        .from('doctors')
+        .select('id, username, current_city')
+        .in('id', missingUids);
+
+      (doctors || []).forEach(d => profileMap.set(d.id, { id: d.id, username: d.username, current_city: d.current_city }));
+    } catch (e) {
+      // Non-fatal: if doctors lookup fails, we still proceed with whatever profiles we have
+      console.error('Failed to fetch doctor profiles fallback:', e?.message || e);
+    }
+  }
+
   return await Promise.all(
     posts.map(async (post) => {
       const profile = profileMap.get(post.user_id) || {};
