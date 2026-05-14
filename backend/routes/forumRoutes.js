@@ -186,9 +186,9 @@ router.get('/feed/global', protect, expressAsyncHandler(async (req, res) => {
     let query = supabase
       .from('posts')
       .select(`
-        id, title, content, category, media_urls, ask_doctor,
-        created_at, updated_at, user_id, is_anonymous, post_type
-      `);
+          id, title, content, category, tags, media_urls, ask_doctor,
+          created_at, updated_at, user_id, is_anonymous, post_type
+        `);
 
     if (prioritizeAskDoctor) {
       query = query
@@ -246,9 +246,9 @@ router.get('/feed/city', protect, expressAsyncHandler(async (req, res) => {
     let query = supabase
       .from('posts')
       .select(`
-        id, title, content, category, media_urls, ask_doctor,
-        created_at, updated_at, user_id, is_anonymous, post_type
-      `);
+          id, title, content, category, tags, media_urls, ask_doctor,
+          created_at, updated_at, user_id, is_anonymous, post_type
+        `);
 
     if (prioritizeAskDoctor) {
       query = query
@@ -939,7 +939,21 @@ router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) 
       .select('id, username')
       .in('id', userIds);
 
-    const profileMap = Object.fromEntries(profiles.map(p => [p.id, p.username]));
+    const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p.username]));
+
+    // If some commenters don't have profiles (e.g., doctors), try doctors table as fallback
+    const missing = userIds.filter(uid => !profileMap[uid]);
+    if (missing.length) {
+      try {
+        const { data: doctors } = await supabase
+          .from('doctors')
+          .select('id, username')
+          .in('id', missing);
+        (doctors || []).forEach(d => { profileMap[d.id] = d.username; });
+      } catch (e) {
+        console.error('Failed to fetch doctor usernames for comments fallback:', e?.message || e);
+      }
+    }
 
     // Fetch likes for all comments in this post so we can return counts and whether the
     // current user has liked each comment. This keeps the frontend in sync without
