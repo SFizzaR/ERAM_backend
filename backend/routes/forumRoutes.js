@@ -31,10 +31,10 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     || req.body.askDoctor === true
     || incomingTagsArray.includes('askDoctor');
 
-  // Remove the special 'askDoctor' tag and normalize tags
+  // Normalize tags (keep special 'askDoctor' tag so it can be shown client-side)
   const tagsArray = incomingTagsArray
     .map(t => String(t).trim())
-    .filter(t => t && t !== 'askDoctor');
+    .filter(Boolean);
 
   // Keep legacy `category` column compatible with the existing DB constraint.
   // The multi-tag data lives in `tags`; `category` is only for backward compatibility.
@@ -920,13 +920,14 @@ router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) 
     const { data: comments, error } = await supabase
       .from('comments')
       .select(`
-        id,
-        content,
-        created_at,
-        user_id,
-        parent_id,
-        post_id
-      `)
+          id,
+          content,
+          created_at,
+          user_id,
+          parent_id,
+          post_id,
+          is_anonymous
+        `)
       .eq('post_id', postId)
       .order('created_at', { ascending: true });
 
@@ -982,7 +983,7 @@ router.get('/posts/:id/comments', protect, expressAsyncHandler(async (req, res) 
       const enriched = {
         id: comment.id,
         content: comment.content,
-        author: profileMap[comment.user_id] || 'Anonymous',
+        author: comment.is_anonymous ? 'Anonymous' : (profileMap[comment.user_id] || 'Unknown'),
         timestamp: comment.created_at,
         // Return authoritative like counts and whether current user liked
         total_likes: likesCountMap[comment.id] || 0,
