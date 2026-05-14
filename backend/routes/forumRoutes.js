@@ -36,8 +36,25 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     .map(t => String(t).trim())
     .filter(t => t && t !== 'askDoctor');
 
-  // Keep legacy `category` column as the first tag (or null)
-  const categoryToInsert = tagsArray.length ? tagsArray[0] : null;
+  // Keep legacy `category` column compatible with the existing DB constraint.
+  // The multi-tag data lives in `tags`; `category` is only for backward compatibility.
+  const categoryCandidates = [
+    tagsArray[0] || null,
+    null,
+    'generalQuestions',
+  ];
+
+  const buildPostPayload = (categoryValue) => ({
+    user_id: userId,
+    title,
+    content,
+    category: categoryValue,
+    tags: tagsArray,
+    media_urls,
+    is_anonymous,
+    post_type,
+    ask_doctor: askDoctor,
+  });
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -49,11 +66,25 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     });
   }
 
-  const { data, error } = await supabase
-    .from('posts')
-    .insert({ user_id: userId, title, content, category: categoryToInsert, tags: tagsArray, media_urls, is_anonymous, post_type, ask_doctor: askDoctor })
-    .select()
-    .single();
+  let data = null;
+  let error = null;
+
+  for (const categoryValue of categoryCandidates) {
+    const result = await supabase
+      .from('posts')
+      .insert(buildPostPayload(categoryValue))
+      .select()
+      .single();
+
+    data = result.data;
+    error = result.error;
+
+    if (!error) break;
+
+    if (!String(error.message || '').includes('posts_category_check')) {
+      break;
+    }
+  }
 
   if (error) return res.status(400).json({ error: error.message });
   res.status(201).json(data);
