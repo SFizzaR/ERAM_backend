@@ -20,9 +20,19 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Invalid post_type. Must be "query" or "insight"' });
   }
 
-  const tags = Array.isArray(req.body.tags)
-    ? req.body.tags.join(',')
-    : req.body.category || req.body.tags || ''; // send tags as comma-separated string or array → send category
+  // Normalize incoming tags into an array and detect askDoctor flag.
+  const incomingTagsArray = Array.isArray(req.body.tags)
+    ? req.body.tags
+    : req.body.category
+    ? String(req.body.category).split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+
+  const askDoctor = req.body.ask_doctor === true
+    || req.body.askDoctor === true
+    || incomingTagsArray.includes('askDoctor');
+
+  // Remove the special 'askDoctor' tag from the category string to satisfy DB constraint
+  const tags = incomingTagsArray.filter(t => t !== 'askDoctor').join(',');
 
   const titleCheck = filterContent(title);
   const contentCheck = filterContent(content);
@@ -36,7 +46,7 @@ router.post('/posts', protect, expressAsyncHandler(async (req, res) => {
 
   const { data, error } = await supabase
     .from('posts')
-    .insert({ user_id: userId, title, content, category: tags, media_urls, is_anonymous, post_type })
+    .insert({ user_id: userId, title, content, category: tags, media_urls, is_anonymous, post_type, ask_doctor: askDoctor })
     .select()
     .single();
 
@@ -51,17 +61,14 @@ async function enrichPosts(posts, userId) {
     .select('id, username, current_city')
     .in('id', uniqueUserIds);
 
-  const { data: doctors } = await supabase
-    .from('doctors')
-    .select('id, username, current_city')
-    .in('id', uniqueUserIds);
+  const profileMap = new Map(profiles.map(p => [p.id, p]));
 
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-  (doctors || []).forEach(d => {
-    if (!profileMap.has(d.id)) {
-      profileMap.set(d.id, d);
-    }
-  });
+  // Fallback to MongoDB if profile missing (rare)
+  const missingUids = uniqueUserIds.filter(uid => !profileMap.has(uid));
+  if (missingUids.length) {
+    const mongoUsers = await User.find({ supabase_uid: { $in: missingUids } });
+    mongoUsers.forEach(u => profileMap.set(u.supabase_uid, { username: u.username, current_city: u.current_city }));
+  }
 
   return await Promise.all(
     posts.map(async (post) => {
@@ -119,6 +126,7 @@ router.get('/feed/global', protect, expressAsyncHandler(async (req, res) => {
   const limit = 20;
   const from = (page - 1) * limit;
   const userId = req.user.id;
+  const prioritizeAskDoctor = req.user.role === 'doctor';
 
   try {
     // Exclude posts the current user has reported
@@ -133,11 +141,19 @@ router.get('/feed/global', protect, expressAsyncHandler(async (req, res) => {
     let query = supabase
       .from('posts')
       .select(`
-        id, title, content, category, media_urls,
+        id, title, content, category, media_urls, ask_doctor,
         created_at, updated_at, user_id, is_anonymous, post_type
-      `)
-      .order('created_at', { ascending: false })
-      .range(from, from + limit - 1);
+      `);
+
+    if (prioritizeAskDoctor) {
+      query = query
+        .order('ask_doctor', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false });
+    } else {
+      query = query.order('created_at', { ascending: false });
+    }
+
+    query = query.range(from, from + limit - 1);
 
     if (reportedIds.length) {
       // exclude posts the user reported so they won't see them
@@ -170,6 +186,7 @@ router.get('/feed/city', protect, expressAsyncHandler(async (req, res) => {
   const limit = 20;
   const from = (page - 1) * limit;
   const userId = req.user.id;
+  const prioritizeAskDoctor = req.user.role === 'doctor';
 
   try {
     // Exclude posts the current user has reported
@@ -184,11 +201,19 @@ router.get('/feed/city', protect, expressAsyncHandler(async (req, res) => {
     let query = supabase
       .from('posts')
       .select(`
-        id, title, content, category, media_urls,
+        id, title, content, category, media_urls, ask_doctor,
         created_at, updated_at, user_id, is_anonymous, post_type
-      `)
-      .order('created_at', { ascending: false })
-      .limit(300); // Safe limit
+      `);
+
+    if (prioritizeAskDoctor) {
+      query = query
+        .order('ask_doctor', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false });
+    } else {
+      query = query.order('created_at', { ascending: false });
+    }
+
+    query = query.limit(300); // Safe limit
 
     if (reportedIds.length) {
       query = query.not('id', 'in', `(${reportedIds.join(',')})`);
